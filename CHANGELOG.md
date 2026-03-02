@@ -1,0 +1,8 @@
+# Changelog
+
+## 0.1.0
+
+- Standardized repository structure to `index.ts` shim + `src/` implementation.
+- Added config template and package metadata/scripts aligned with Pi extension conventions.
+- Vendored `zellij-modal` into this repository to remove cross-extension imports.
+- Modularized implementation into config store, logging, and audio notification modules while preserving runtime behavior.
