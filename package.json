@@ -1,0 +1,53 @@
+{
+  "name": "pi-smart-voice-notify",
+  "version": "0.1.0",
+  "description": "Windows-optimized smart voice, sound, and desktop notifications for Pi coding agent.",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "config/config.example.json",
+    "assets",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "npx --yes -p typescript@5.7.3 tsc -p tsconfig.json --noCheck",
+    "lint": "npm run build",
+    "test": "node --test",
+    "check": "npm run lint && npm run test"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "voice-notify",
+    "windows",
+    "desktop-notification"
+  ],
+  "author": "MasuRii",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "dependencies": {
+    "node-notifier": "^10.0.1"
+  }
+}
