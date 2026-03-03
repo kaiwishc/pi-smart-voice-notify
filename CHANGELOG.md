@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.1] - 2026-03-04
+
+### Changed
+- Rewrote README.md with professional documentation standards
+- Added comprehensive feature documentation, configuration reference, and usage examples
+
 ## 0.1.0
 
 - Standardized repository structure to `index.ts` shim + `src/` implementation.
