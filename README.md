@@ -4,7 +4,7 @@ Windows-optimized smart notification extension for the Pi coding agent.
 
 **pi-smart-voice-notify** monitors Pi session and tool events to alert you via **Windows SAPI TTS**, **sound playback**, and **desktop toast notifications** when the agent requires your attention.
 
-![pi-smart-voice-notify configuration modal](assets/pi-smart-voice-notify.png)
+![pi-smart-voice-notify configuration modal](https://raw.githubusercontent.com/MasuRii/pi-smart-voice-notify/main/assets/pi-smart-voice-notify.png)
 
 ## Features
 
