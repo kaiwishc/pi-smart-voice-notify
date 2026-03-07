@@ -1,3 +1,4 @@
+import { runAbortableCommand } from "./abortable-command.js";
 import {
 	clampInt,
 	DEFAULT_CONFIG,
@@ -172,9 +173,12 @@ try {
 		}
 	}
 
-	public async speakWithSapi(text: string): Promise<void> {
+	public async speakWithSapi(text: string, signal?: AbortSignal): Promise<void> {
 		const config = this.getConfig();
 		if (!isWindows() || !config.enableTts) {
+			return;
+		}
+		if (signal?.aborted) {
 			return;
 		}
 
@@ -202,7 +206,10 @@ try {
 }
 `;
 
-		const result = await this.runPowerShell(script, 30_000, "speak-sapi");
+		const result = await this.runPowerShell(script, 30_000, "speak-sapi", signal);
+		if (signal?.aborted) {
+			return;
+		}
 		if (!result.ok) {
 			throw new Error(result.stderr || result.stdout || "Failed to speak with SAPI");
 		}
@@ -259,14 +266,21 @@ try {
 		script: string,
 		timeout = 20_000,
 		action = "unknown",
+		signal?: AbortSignal,
 	): Promise<{ ok: boolean; stdout: string; stderr: string }> {
 		const startedAt = Date.now();
 		const encoded = this.encodePowerShell(script);
-		const result = await this.execRunner.exec(
-			"powershell.exe",
-			["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-			{ timeout },
-		);
+		const result = signal
+			? await runAbortableCommand(
+					"powershell.exe",
+					["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+					{ timeoutMs: timeout, signal },
+				)
+			: await this.execRunner.exec(
+					"powershell.exe",
+					["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+					{ timeout },
+				);
 		const payload = {
 			ok: result.code === 0,
 			stdout: result.stdout,
@@ -288,9 +302,12 @@ try {
 		args: string[],
 		timeout = 20_000,
 		action = "process",
+		signal?: AbortSignal,
 	): Promise<{ ok: boolean; stdout: string; stderr: string }> {
 		const startedAt = Date.now();
-		const result = await this.execRunner.exec(executable, args, { timeout });
+		const result = signal
+			? await runAbortableCommand(executable, args, { timeoutMs: timeout, signal })
+			: await this.execRunner.exec(executable, args, { timeout });
 		const payload = {
 			ok: result.code === 0,
 			stdout: result.stdout,
