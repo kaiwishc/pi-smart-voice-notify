@@ -2,31 +2,41 @@
 
 Windows-optimized smart notification extension for the Pi coding agent.
 
-**pi-smart-voice-notify** monitors Pi session and tool events to alert you via **Windows SAPI TTS**, **sound playback**, and **desktop toast notifications** when the agent requires your attention.
+**pi-smart-voice-notify** monitors Pi session and tool events to alert you via **multi-engine TTS**, **sound playback**, **desktop toast notifications**, and optional **webhook/AI-assisted messaging** when the agent requires your attention.
 
 ![pi-smart-voice-notify configuration modal](https://raw.githubusercontent.com/MasuRii/pi-smart-voice-notify/main/assets/pi-smart-voice-notify.png)
 
 ## Features
 
 - **Multi-channel notifications**
-  - **Sound** – Windows audio playback via PowerShell (with beep fallback)
-  - **Voice** – Windows SAPI text-to-speech with configurable voice and rate
-  - **Desktop toasts** – Cross-platform notifications via `node-notifier` (Windows/macOS/Linux)
+  - **Sound** – local sound playback with fallback beeps and reusable reminder playback control
+  - **Voice** – auto-selectable TTS engines: Edge, espeak-ng, ElevenLabs, OpenAI-compatible, and Windows SAPI
+  - **Desktop toasts** – cross-platform notifications via `node-notifier` (Windows/macOS/Linux)
+  - **Webhook delivery** – optional Discord or generic HTTP webhook notifications
 
 - **Intelligent event detection**
   - Task completion (idle)
-  - Permission blocks
+  - Direct permission blocks plus forwarded subagent permission requests
   - Questions requiring input (when custom `question` tool is loaded)
   - Errors
 
 - **Reminder system**
-  - Configurable reminder delays with follow-up scheduling
+  - Configurable per-event reminder delays with follow-up scheduling
   - Exponential backoff multiplier for follow-ups
-  - Auto-cancel reminders on user activity
+  - Auto-cancel reminders on user activity or resolution
 
-- **Wake monitor support**
+- **Focus and wake handling**
   - Wakes display from sleep before notifications
-  - Cross-platform: Windows (SendKeys), macOS (caffeinate), Linux (xset/GNOME)
+  - Optional focused-terminal suppression on Linux
+  - Cross-platform wake strategies for Windows, macOS, and Linux sessions
+
+- **Sound customization**
+  - Direct per-event sound files
+  - Theme-based sound selection and optional per-project sound discovery
+  - Theme randomization and default volume controls
+
+- **AI message generation**
+  - Optional AI-generated notification text with caching and template fallback
 
 - **Interactive settings UI**
   - `/voice-notify` command opens a modal for live configuration
@@ -93,14 +103,18 @@ A starter template is provided in `config/config.example.json`. On startup, the 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | boolean | `true` | Master on/off switch |
-| `windowsOptimized` | boolean | `true` | Show warning on non-Windows platforms |
+| `windowsOptimized` | boolean | `true` | Show a compatibility notice on platforms other than Windows/Linux |
 | `notificationMode` | string | `"sound-first"` | Mode: `sound-first`, `tts-first`, `both`, `sound-only` |
-| `enableSound` | boolean | `true` | Enable sound playback (Windows) |
-| `enableTts` | boolean | `true` | Enable text-to-speech (Windows) |
+| `enableSound` | boolean | `true` | Enable sound playback |
+| `enableTts` | boolean | `true` | Enable text-to-speech delivery |
+| `ttsEngine` | string | `"auto"` | Engine: `auto`, `edge`, `espeak-ng`, `elevenlabs`, `openai`, `sapi` |
 | `enableDesktopNotification` | boolean | `true` | Enable desktop toast notifications |
 | `desktopNotificationTimeout` | number | `8` | Toast display duration in seconds (1–60) |
 | `wakeMonitor` | boolean | `true` | Wake display from sleep before notifying |
 | `idleThresholdSeconds` | number | `30` | System idle threshold before waking monitor (5–600) |
+| `skipWhenFocused` | boolean | `false` | Suppress notifications while the active Linux terminal/editor is focused |
+
+`windowsOptimized` keeps compatibility messaging for platforms that do not have Linux/Windows-native behavior. Linux users no longer see this notice.
 
 ### Event Toggles
 
@@ -108,11 +122,16 @@ A starter template is provided in `config/config.example.json`. On startup, the 
 |--------|------|---------|-------------|
 | `enableIdleNotification` | boolean | `true` | Notify when agent finishes a task |
 | `enablePermissionNotification` | boolean | `true` | Notify on permission blocks |
+| `enableForwardedPermissionWatcher` | boolean | `true` | Watch forwarded permission request files and notify when new requests arrive |
+| `includeForwardedPermissionAgentName` | boolean | `true` | Include sanitized requester agent name in forwarded permission notification text |
+| `watchLegacyForwardedPermissionPath` | boolean | `true` | Also watch legacy `~/.pi/agent/permission-forwarding/requests` when present |
 | `enableQuestionNotification` | boolean | `true` | Notify when agent asks a question* |
 | `enableErrorNotification` | boolean | `true` | Notify on errors |
 | `suppressIdleAfterError` | boolean | `true` | Skip idle notification if turn had errors |
 
 *Question notifications only work when a custom `question` tool is loaded.
+
+Forwarded permission watcher notifications use privacy-safe text and never include raw forwarded `message` content.
 
 ### Reminder Settings
 
@@ -124,12 +143,20 @@ A starter template is provided in `config/config.example.json`. On startup, the 
 | `maxFollowUps` | number | `3` | Maximum follow-up count (1–10) |
 | `followUpBackoffMultiplier` | number | `1.5` | Delay multiplier for each follow-up |
 
-### TTS Settings (Windows)
+### TTS Settings
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `ttsVoice` | string | `"Microsoft Zira Desktop"` | SAPI voice name |
-| `ttsRate` | number | `-1` | Speech rate (-10 to 10) |
+| `voice` | string | `"Microsoft Zira Desktop"` | Generic preferred voice label |
+| `rate` | number | `-1` | Generic speaking rate |
+| `volume` | number | `85` | Preferred playback volume percentage |
+| `fallbackChain` | array | `["edge", "espeak-ng", "sapi"]` | TTS engines tried when `ttsEngine` is `auto` |
+| `ttsVoice` | string | `"Microsoft Zira Desktop"` | Legacy SAPI-compatible alias |
+| `ttsRate` | number | `-1` | Legacy SAPI-compatible alias |
+| `edgeVoice` | string | `"en-US-JennyNeural"` | Microsoft Edge voice |
+| `espeakVoice` | string | `"en"` | `espeak-ng` voice for Linux fallback |
+| `elevenLabsVoiceId` | string | `"cgSgspJ2msm6clMCkdW9"` | ElevenLabs voice id |
+| `openaiTtsVoice` | string | `"alloy"` | OpenAI-compatible voice |
 
 ### Sound File Paths
 
@@ -142,10 +169,18 @@ A starter template is provided in `config/config.example.json`. On startup, the 
 
 Paths can be absolute or relative to the extension directory.
 
-### Advanced Settings
+### Sound, Webhook, and AI Settings
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `themeName` | string | `"default"` | Preferred sound theme name |
+| `enablePerProjectSounds` | boolean | `false` | Search the current project for matching notification sounds |
+| `randomizeThemeSounds` | boolean | `true` | Randomize among matching themed sounds |
+| `webhook.enabled` | boolean | `false` | Enable Discord/generic webhook delivery |
+| `webhook.events` | array | `["idle", "permission", "question", "error"]` | Notification types sent through webhooks |
+| `aiMessages.enabled` | boolean | `false` | Enable AI-generated notification copy |
+| `aiMessages.model` | string | `"llama3"` | Model id used for AI notification generation |
+| `aiMessages.caching.enabled` | boolean | `true` | Cache generated messages to reduce repeat calls |
 | `minNotificationIntervalMs` | number | `1500` | Throttle interval between same-type notifications |
 | `debugLog` | boolean | `false` | Enable debug logging to file |
 
@@ -196,10 +231,19 @@ Ensure system idle time exceeds `idleThresholdSeconds` for wake to trigger.
 index.ts                    → Extension entrypoint (re-exports src/index.ts)
 src/
 ├── index.ts                → Main extension logic, event handlers, command registration
-├── config-store.ts         → Config paths, normalization, load/save utilities
-├── types.ts                → TypeScript interfaces and types
-├── notify-audio.ts         → Windows sound + SAPI TTS + monitor wake service
+├── config-store.ts         → Config paths, normalization, env overrides, load/save utilities
+├── types.ts                → Shared configuration and runtime types
+├── notify-audio.ts         → Audio dispatch and Windows/SAPI playback integration
+├── tts.ts                  → Multi-engine TTS selection and speech dispatch
 ├── desktop-notify.ts       → Desktop toast notifications via node-notifier
+├── permission-forwarding-watcher.ts → Watches forwarded permission request directories
+├── reminder-playback.ts    → Deduplicates/cancels overlapping reminder playback
+├── sound-theme.ts          → Theme and sound file resolution
+├── per-project-sound.ts    → Project-local sound discovery helpers
+├── webhook.ts              → Discord and generic HTTP webhook delivery
+├── ai-messages.ts          → AI-generated notification message generation and caching
+├── linux.ts                → Linux wake/audio/focus helpers
+├── focus-detect.ts         → Terminal focus detection cache
 ├── logging.ts              → Debug logger with JSONL output
 └── zellij-modal.ts         → Settings modal UI components
 ```
@@ -232,12 +276,12 @@ Events include: config changes, notifications triggered, audio dispatch, reminde
 ```bash
 npm install
 npm run build      # TypeScript compilation
-npm run lint       # Run linter
-npm run test       # Run tests
-npm run check      # lint + test
+npm run lint       # Alias for build
+npm run test       # Node test runner with built-in TypeScript stripping
+npm run check      # build + test
 ```
 
-**Requirements:** Node.js ≥ 20
+**Requirements:** Node.js ≥ 24
 
 ## License
 

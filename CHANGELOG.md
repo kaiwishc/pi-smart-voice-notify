@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0] - 2026-03-07
+
+### Added
+- Added multi-engine TTS support with auto selection plus Edge, espeak-ng, ElevenLabs, OpenAI-compatible, and SAPI backends.
+- Added forwarded permission request watching, reminder playback control, Linux wake/focus helpers, per-project sound discovery, webhook delivery, and AI-generated notification message support.
+- Added targeted tests for abortable commands, reminder playback, and forwarded-permission notification flows.
+
+### Changed
+- Expanded configuration normalization and example config to cover nested reminder, webhook, AI-message, focus-detection, and sound-theme settings while keeping legacy keys compatible.
+- Improved notification orchestration so reminder scheduling, focused-terminal suppression, and desktop/audio delivery can share richer runtime context.
+- Switched the test runner to Node's built-in TypeScript stripping support and raised the documented runtime baseline to Node.js 24.
+
+### Fixed
+- Restored the package test workflow so the published repo can run its checked-in TypeScript tests without a missing loader file.
+- Updated README documentation to cover the new engines, watchers, webhook/AI integrations, and sound-theme behavior.
+
 ## [0.1.2] - 2026-03-04
 
 ### Fixed

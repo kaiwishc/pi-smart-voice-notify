@@ -1,6 +1,6 @@
 {
   "name": "pi-smart-voice-notify",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Windows-optimized smart voice, sound, and desktop notifications for Pi coding agent.",
   "type": "module",
   "main": "./index.ts",
@@ -17,10 +17,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "npx --yes -p typescript@5.7.3 tsc -p tsconfig.json --noCheck",
+    "build": "npx --yes -p typescript@5.7.3 -p @types/node@20.17.57 tsc -p tsconfig.json --noEmit",
     "lint": "npm run build",
-    "test": "node --test",
-    "check": "npm run lint && npm run test"
+    "test": "node --import ./test-ts-register.mjs --test src/abortable-command.test.ts src/reminder-playback.test.ts src/index.test.ts",
+    "check": "npm run build && npm run test"
   },
   "keywords": [
     "pi-package",
@@ -33,7 +33,7 @@
   "author": "MasuRii",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "publishConfig": {
     "access": "public"
