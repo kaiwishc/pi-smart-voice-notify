@@ -19,7 +19,7 @@
   "scripts": {
     "build": "npx --yes -p typescript@5.7.3 -p @types/node@20.17.57 tsc -p tsconfig.json --noEmit",
     "lint": "npm run build",
-    "test": "node --import ./test-ts-register.mjs --test src/abortable-command.test.ts src/reminder-playback.test.ts src/index.test.ts",
+    "test": "node --experimental-strip-types --test src/abortable-command.test.ts src/reminder-playback.test.ts src/index.test.ts",
     "check": "npm run build && npm run test"
   },
   "keywords": [
