@@ -10,7 +10,7 @@ import type {
 	SoundFileField,
 	TTSEngine,
 	VoiceNotifyConfig,
-} from "./types.js";
+} from "./types.ts";
 
 export const EXTENSION_ID = "pi-smart-voice-notify";
 export const STATUS_KEY = "smart-voice-notify";

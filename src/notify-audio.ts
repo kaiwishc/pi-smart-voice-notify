@@ -1,12 +1,12 @@
-import { runAbortableCommand } from "./abortable-command.js";
+import { runAbortableCommand } from "./abortable-command.ts";
 import {
 	clampInt,
 	DEFAULT_CONFIG,
 	isWindows,
 	resolveSoundFile,
 	SOUND_LOOPS,
-} from "./config-store.js";
-import type { NotificationType, VoiceNotifyConfig } from "./types.js";
+} from "./config-store.ts";
+import type { NotificationType, VoiceNotifyConfig } from "./types.ts";
 
 interface ExecResult {
 	code: number;

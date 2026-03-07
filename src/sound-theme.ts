@@ -3,8 +3,8 @@ import { access, readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getCurrentVolume, playAudio, setVolume } from "./linux.js";
-import { resolveProjectSoundContext } from "./per-project-sound.js";
+import { getCurrentVolume, playAudio, setVolume } from "./linux.ts";
+import { resolveProjectSoundContext } from "./per-project-sound.ts";
 
 export const SOUND_CATEGORIES = ["notification", "alert", "success", "error", "reminder"] as const;
 

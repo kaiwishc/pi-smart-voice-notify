@@ -1,3 +1,3 @@
-import smartVoiceNotifyExtension from "./src/index.js";
+import smartVoiceNotifyExtension from "./src/index.ts";
 
 export default smartVoiceNotifyExtension;

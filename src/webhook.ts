@@ -1,5 +1,5 @@
-import type { NotificationType } from "./types.js";
-import { getErrorMessage } from "./logging.js";
+import type { NotificationType } from "./types.ts";
+import { getErrorMessage } from "./logging.ts";
 
 export type WebhookEventType = NotificationType | (string & {});
 export type WebhookProvider = "discord" | "generic";

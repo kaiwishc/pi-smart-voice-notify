@@ -6,7 +6,7 @@ import type {
 import type { SettingItem } from "@mariozechner/pi-tui";
 import { basename } from "node:path";
 
-import { initializeAIMessageService } from "./ai-messages.js";
+import { initializeAIMessageService } from "./ai-messages.ts";
 import {
 	BOOLEAN_VALUES,
 	clampInt,
@@ -29,26 +29,26 @@ import {
 	writeConfigToDisk,
 	boolValue,
 	ensureDebugDirectory,
-} from "./config-store.js";
-import { sendDesktopNotification } from "./desktop-notify.js";
-import { clearFocusDetectCache, isTerminalFocused } from "./focus-detect.js";
-import { detectLinuxSession, getIdleTime, wakeMonitor as wakeLinuxMonitor } from "./linux.js";
-import { createExtensionLogger, getErrorMessage } from "./logging.js";
-import { AudioNotificationService } from "./notify-audio.js";
-import { PermissionForwardingWatcher } from "./permission-forwarding-watcher.js";
-import { clearProjectSoundCache } from "./per-project-sound.js";
-import { ReminderPlaybackController } from "./reminder-playback.js";
-import { SoundThemeService, type SoundThemeConfig } from "./sound-theme.js";
-import { initializeTTSService } from "./tts.js";
+} from "./config-store.ts";
+import { sendDesktopNotification } from "./desktop-notify.ts";
+import { clearFocusDetectCache, isTerminalFocused } from "./focus-detect.ts";
+import { detectLinuxSession, getIdleTime, wakeMonitor as wakeLinuxMonitor } from "./linux.ts";
+import { createExtensionLogger, getErrorMessage } from "./logging.ts";
+import { AudioNotificationService } from "./notify-audio.ts";
+import { PermissionForwardingWatcher } from "./permission-forwarding-watcher.ts";
+import { clearProjectSoundCache } from "./per-project-sound.ts";
+import { ReminderPlaybackController } from "./reminder-playback.ts";
+import { SoundThemeService, type SoundThemeConfig } from "./sound-theme.ts";
+import { initializeTTSService } from "./tts.ts";
 import type {
 	NotificationType,
 	NotifyLevel,
 	ReminderState,
 	VoiceNotifyConfig,
-} from "./types.js";
-import type { TTSService } from "./types/tts.js";
-import { createWebhookService } from "./webhook.js";
-import { ZellijModal, ZellijSettingsModal } from "./zellij-modal.js";
+} from "./types.ts";
+import type { TTSService } from "./types/tts.ts";
+import { createWebhookService } from "./webhook.ts";
+import { ZellijModal, ZellijSettingsModal } from "./zellij-modal.ts";
 
 function pickRandom<T>(items: readonly T[]): T {
 	const index = Math.floor(Math.random() * items.length);

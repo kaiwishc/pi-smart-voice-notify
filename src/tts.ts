@@ -4,8 +4,8 @@ import { unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runAbortableCommand } from "./abortable-command.js";
-import { getErrorMessage } from "./logging.js";
+import { runAbortableCommand } from "./abortable-command.ts";
+import { getErrorMessage } from "./logging.ts";
 import type {
 	ConcreteTTSEngine,
 	SpeakOptions,
@@ -16,7 +16,7 @@ import type {
 	TTSExecRunner,
 	TTSService,
 	TTSServiceOptions,
-} from "./types/tts.js";
+} from "./types/tts.ts";
 
 const DEFAULT_TTS_CONFIG: TTSConfig = {
 	enableTts: true,

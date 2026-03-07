@@ -1,4 +1,4 @@
-import type { NotificationType } from "./types.js";
+import type { NotificationType } from "./types.ts";
 
 export interface ReminderPlaybackCheckpoint {
 	reminderKey: string;

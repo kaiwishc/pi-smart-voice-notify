@@ -1,4 +1,4 @@
-import { getErrorMessage } from "./logging.js";
+import { getErrorMessage } from "./logging.ts";
 
 export const AI_EVENT_TYPES = [
 	"idle",

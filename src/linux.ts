@@ -1,12 +1,12 @@
 import { exec, spawn } from "child_process";
 
-import { getErrorMessage } from "./logging.js";
+import { getErrorMessage } from "./logging.ts";
 import type {
 	LinuxCommandResult,
 	LinuxSessionInfo,
 	LinuxSessionType,
 	LinuxUtilsOptions,
-} from "./types/linux.js";
+} from "./types/linux.ts";
 
 const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_AUDIO_TIMEOUT_MS = 20_000;

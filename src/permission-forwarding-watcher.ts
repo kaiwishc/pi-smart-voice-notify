@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, watch, type FSWatcher } from "no
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { getErrorMessage } from "./logging.js";
+import { getErrorMessage } from "./logging.ts";
 
 export type PermissionForwardingSource = "primary" | "legacy";
 export type ForwardedPermissionResolutionReason = "request_removed" | "watch_disabled" | "watcher_stopped";
