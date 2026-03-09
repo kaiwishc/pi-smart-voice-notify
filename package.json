@@ -1,6 +1,6 @@
 {
   "name": "pi-smart-voice-notify",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Windows-optimized smart voice, sound, and desktop notifications for Pi coding agent.",
   "type": "module",
   "main": "./index.ts",
@@ -32,6 +32,14 @@
   ],
   "author": "MasuRii",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MasuRii/pi-smart-voice-notify.git"
+  },
+  "homepage": "https://github.com/MasuRii/pi-smart-voice-notify#readme",
+  "bugs": {
+    "url": "https://github.com/MasuRii/pi-smart-voice-notify/issues"
+  },
   "engines": {
     "node": ">=24"
   },
