@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2] - 2026-03-12
+
+### Changed
+- Refactored to use shared `toRecord` utility, removing duplicate implementation
+- Consolidated exports and simplified `index.ts`
+
 ## [0.2.0] - 2026-03-07
 
 ### Added
