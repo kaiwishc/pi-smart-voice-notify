@@ -1,3 +1,4 @@
+import { normalizeFloat } from "./config-store.ts";
 import { getErrorMessage } from "./logging.ts";
 
 export const AI_EVENT_TYPES = [
@@ -132,13 +133,6 @@ function normalizePositiveInt(value: number, fallback: number, min: number, max:
 		return fallback;
 	}
 	return Math.min(max, Math.max(min, Math.round(value)));
-}
-
-function normalizeFloat(value: number, fallback: number, min: number, max: number): number {
-	if (!Number.isFinite(value)) {
-		return fallback;
-	}
-	return Math.min(max, Math.max(min, value));
 }
 
 function normalizeConfig(overrides: Partial<AIMessageConfig> = {}): AIMessageConfig {

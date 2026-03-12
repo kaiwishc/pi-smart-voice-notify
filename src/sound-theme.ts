@@ -4,7 +4,16 @@ import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { getCurrentVolume, playAudio, setVolume } from "./linux.ts";
-import { resolveProjectSoundContext } from "./per-project-sound.ts";
+import {
+	AUDIO_EXTENSIONS,
+	isDirectory as checkIsDirectory,
+	isReadableAudioFile as checkIsReadableAudioFile,
+	listAudioFiles as listProjectAudioFiles,
+	noop,
+	normalizeVolume,
+	resolveProjectSoundContext,
+	uniquePaths,
+} from "./per-project-sound.ts";
 
 export const SOUND_CATEGORIES = ["notification", "alert", "success", "error", "reminder"] as const;
 
@@ -64,7 +73,6 @@ export interface SoundThemeServiceOptions {
 	debugLog?: (message: string) => void;
 }
 
-const SUPPORTED_EXTENSIONS = new Set([".mp3", ".wav", ".ogg", ".m4a", ".flac"]);
 const EVENT_TO_CATEGORY: Record<string, SoundCategory> = {
 	notification: "notification",
 	alert: "alert",
@@ -82,24 +90,7 @@ const DEFAULT_ASSETS_DIRECTORY = fileURLToPath(new URL("../assets", import.meta.
 
 type DebugLog = (message: string) => void;
 
-function noop(): void {
-	// no-op
-}
-
-function normalizeVolume(value: number | undefined | null): number | null {
-	if (typeof value !== "number" || Number.isNaN(value)) {
-		return null;
-	}
-	const clamped = Math.max(0, Math.min(100, Math.round(value)));
-	return Number.isFinite(clamped) ? clamped : null;
-}
-
-function toUniquePaths(paths: string[]): string[] {
-	const normalized = paths.map((value) => resolve(value));
-	return [...new Set(normalized)];
-}
-
-async function pathExists(pathValue: string): Promise<boolean> {
+async function isReadable(pathValue: string): Promise<boolean> {
 	try {
 		await access(pathValue, fsConstants.R_OK);
 		return true;
@@ -108,51 +99,11 @@ async function pathExists(pathValue: string): Promise<boolean> {
 	}
 }
 
-async function isDirectory(pathValue: string): Promise<boolean> {
-	try {
-		const stats = await stat(pathValue);
-		return stats.isDirectory();
-	} catch {
-		return false;
-	}
-}
+const isDirectory = checkIsDirectory;
 
-async function isReadableAudioFile(pathValue: string): Promise<boolean> {
-	if (!SUPPORTED_EXTENSIONS.has(extname(pathValue).toLowerCase())) {
-		return false;
-	}
-	try {
-		const stats = await stat(pathValue);
-		if (!stats.isFile()) {
-			return false;
-		}
-		await access(pathValue, fsConstants.R_OK);
-		return true;
-	} catch {
-		return false;
-	}
-}
+const isReadableAudioFile = checkIsReadableAudioFile;
 
-async function listAudioFiles(directory: string): Promise<string[]> {
-	if (!(await isDirectory(directory))) {
-		return [];
-	}
-
-	const entries = await readdir(directory, { withFileTypes: true });
-	const files = entries
-		.filter((entry) => entry.isFile())
-		.map((entry) => join(directory, entry.name))
-		.filter((filePath) => SUPPORTED_EXTENSIONS.has(extname(filePath).toLowerCase()))
-		.sort((left, right) => left.localeCompare(right));
-
-	const validFiles: string[] = [];
-	for (const filePath of files) {
-		if (await isReadableAudioFile(filePath)) {
-			validFiles.push(filePath);
-		}
-	}
-	return validFiles;
-}
+const listAudioFiles = listProjectAudioFiles;
 
 async function resolveSoundReference(reference: string, searchDirectories: string[]): Promise<string | null> {
 	const trimmed = reference.trim();
@@ -192,7 +143,7 @@ async function loadManifest(themeDirectory: string): Promise<ThemeManifest | nul
 	const manifestCandidates = ["theme.json", "sound-theme.json"].map((fileName) => join(themeDirectory, fileName));
 
 	for (const manifestPath of manifestCandidates) {
-		if (!(await pathExists(manifestPath))) {
+		if (!(await isReadable(manifestPath))) {
 			continue;
 		}
 		try {
@@ -213,7 +164,7 @@ async function loadConfigFromFile(configPath: string | undefined): Promise<Sound
 	if (!configPath) {
 		return {};
 	}
-	if (!(await pathExists(configPath))) {
+	if (!(await isReadable(configPath))) {
 		return {};
 	}
 
@@ -299,7 +250,7 @@ async function resolveThemeDirectories(config: SoundThemeConfig, assetsDirectory
 	}
 	directories.push(assetsDirectory);
 
-	const uniqueDirectories = toUniquePaths(directories);
+	const uniqueDirectories = uniquePaths(directories);
 	const existingDirectories: string[] = [];
 	for (const directory of uniqueDirectories) {
 		if (await isDirectory(directory)) {
@@ -414,7 +365,7 @@ export class SoundThemeService {
 				const fromCategoryDirectory = await listAudioFiles(categoryDir);
 				categoryCandidates.push(...fromCategoryDirectory);
 
-				for (const extension of SUPPORTED_EXTENSIONS) {
+				for (const extension of AUDIO_EXTENSIONS) {
 					const directFile = join(directory, `${category}${extension}`);
 					if (await isReadableAudioFile(directFile)) {
 						categoryCandidates.push(directFile);
@@ -422,7 +373,7 @@ export class SoundThemeService {
 				}
 			}
 
-			const uniqueCategoryCandidates = toUniquePaths(categoryCandidates);
+			const uniqueCategoryCandidates = uniquePaths(categoryCandidates);
 			if (uniqueCategoryCandidates.length > 0) {
 				soundsByCategory[category] = uniqueCategoryCandidates;
 				continue;

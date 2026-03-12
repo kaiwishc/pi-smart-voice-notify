@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runAbortableCommand } from "./abortable-command.ts";
+import { normalizeFloat } from "./config-store.ts";
 import { getErrorMessage } from "./logging.ts";
 import type {
 	ConcreteTTSEngine,
@@ -69,13 +70,6 @@ function normalizeRate(value: number, fallback: number, min: number, max: number
 		return fallback;
 	}
 	return Math.min(max, Math.max(min, Math.round(value)));
-}
-
-function normalizeFloat(value: number, fallback: number, min: number, max: number): number {
-	if (!Number.isFinite(value)) {
-		return fallback;
-	}
-	return Math.min(max, Math.max(min, value));
 }
 
 function mergeConfig(base: TTSConfig, overrides: Partial<TTSConfig>): TTSConfig {

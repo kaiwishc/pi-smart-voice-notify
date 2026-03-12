@@ -1,5 +1,6 @@
 import { exec, type ExecOptionsWithStringEncoding } from "node:child_process";
 import { promisify } from "node:util";
+import { getErrorMessage } from "./logging.ts";
 
 export type LinuxSessionType = "x11" | "wayland" | "unknown";
 
@@ -100,13 +101,6 @@ function emitLog(
 	console.warn("[focus-detect]", message, details);
 }
 
-function errorToString(error: unknown): string {
-	if (error instanceof Error) {
-		return error.message;
-	}
-	return String(error);
-}
-
 export function detectLinuxSessionType(env: NodeJS.ProcessEnv = process.env): LinuxSessionType {
 	const explicit = env.XDG_SESSION_TYPE?.toLowerCase().trim();
 	if (explicit === "x11" || explicit === "wayland") {
@@ -170,7 +164,7 @@ async function runCommand(
 	} catch (error) {
 		emitLog("error", `${label}: command failed`, options, {
 			command,
-			error: errorToString(error),
+			error: getErrorMessage(error),
 		});
 		return null;
 	}
@@ -252,7 +246,7 @@ async function getFocusedWindowWaylandSway(options: FocusDetectOptions): Promise
 		);
 	} catch (error) {
 		emitLog("error", "wayland.sway failed to parse sway tree", options, {
-			error: errorToString(error),
+			error: getErrorMessage(error),
 		});
 		return null;
 	}

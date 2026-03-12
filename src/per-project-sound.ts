@@ -14,7 +14,7 @@ const PROJECT_MARKERS = [
 	".pi",
 ] as const;
 
-const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".ogg", ".m4a", ".flac"]);
+export const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".ogg", ".m4a", ".flac"]);
 
 export const PROJECT_SOUND_CATEGORIES = ["notification", "alert", "success", "error", "reminder"] as const;
 
@@ -49,11 +49,11 @@ interface ProjectSoundsManifest {
 let activeProjectRoot: string | null = null;
 const projectSoundCache = new Map<string, ProjectSoundContext | null>();
 
-function noop(): void {
+export function noop(): void {
 	// no-op
 }
 
-async function pathExists(pathValue: string): Promise<boolean> {
+export async function pathExists(pathValue: string): Promise<boolean> {
 	try {
 		await access(pathValue, fsConstants.F_OK);
 		return true;
@@ -62,7 +62,7 @@ async function pathExists(pathValue: string): Promise<boolean> {
 	}
 }
 
-async function isDirectory(pathValue: string): Promise<boolean> {
+export async function isDirectory(pathValue: string): Promise<boolean> {
 	try {
 		const stats = await stat(pathValue);
 		return stats.isDirectory();
@@ -71,7 +71,7 @@ async function isDirectory(pathValue: string): Promise<boolean> {
 	}
 }
 
-async function isReadableAudioFile(pathValue: string): Promise<boolean> {
+export async function isReadableAudioFile(pathValue: string): Promise<boolean> {
 	if (!AUDIO_EXTENSIONS.has(extname(pathValue).toLowerCase())) {
 		return false;
 	}
@@ -88,7 +88,7 @@ async function isReadableAudioFile(pathValue: string): Promise<boolean> {
 	}
 }
 
-async function listAudioFiles(directory: string): Promise<string[]> {
+export async function listAudioFiles(directory: string): Promise<string[]> {
 	if (!(await isDirectory(directory))) {
 		return [];
 	}
@@ -110,16 +110,16 @@ async function listAudioFiles(directory: string): Promise<string[]> {
 	return files;
 }
 
-function uniquePaths(paths: string[]): string[] {
+export function uniquePaths(paths: string[]): string[] {
 	return [...new Set(paths.map((entry) => resolve(entry)))];
 }
 
-function normalizeVolume(value: number | undefined): number | undefined {
+export function normalizeVolume(value: number | undefined | null): number | null {
 	if (typeof value !== "number" || Number.isNaN(value)) {
-		return undefined;
+		return null;
 	}
 	const clamped = Math.max(0, Math.min(100, Math.round(value)));
-	return Number.isFinite(clamped) ? clamped : undefined;
+	return Number.isFinite(clamped) ? clamped : null;
 }
 
 async function hasProjectMarker(directory: string): Promise<boolean> {
@@ -240,7 +240,7 @@ async function resolveVolumeByFile(
 	const resolved: Record<string, number> = {};
 	for (const [filePath, rawVolume] of Object.entries(volumeByFile)) {
 		const normalizedVolume = normalizeVolume(rawVolume);
-		if (normalizedVolume === undefined) {
+		if (normalizedVolume === null) {
 			continue;
 		}
 

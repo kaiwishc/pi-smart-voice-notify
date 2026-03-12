@@ -265,7 +265,7 @@ export const DEFAULT_CONFIG: VoiceNotifyConfig = {
 	debugLog: false,
 };
 
-function toRecord(value: unknown): Record<string, unknown> {
+export function toRecord(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		return {};
 	}
@@ -323,6 +323,13 @@ export function clampNumber(value: unknown, fallback: number, min: number, max: 
 		return fallback;
 	}
 	return Math.min(max, Math.max(min, numeric));
+}
+
+export function normalizeFloat(value: number, fallback: number, min: number, max: number): number {
+	if (!Number.isFinite(value)) {
+		return fallback;
+	}
+	return Math.min(max, Math.max(min, value));
 }
 
 function boolOrDefault(value: unknown, fallback: boolean): boolean {

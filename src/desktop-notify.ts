@@ -1,4 +1,5 @@
-type NotificationType = "idle" | "permission" | "question" | "error";
+import type { NotificationType } from "./types.ts";
+import { getErrorMessage } from "./logging.ts";
 
 type LinuxUrgency = "low" | "normal" | "critical";
 
@@ -43,13 +44,6 @@ const LINUX_URGENCY: Record<NotificationType, LinuxUrgency> = {
 };
 
 let notifierPromise: Promise<NotifierLike | null> | null = null;
-
-function getErrorMessage(error: unknown): string {
-	if (error instanceof Error) {
-		return error.message;
-	}
-	return String(error);
-}
 
 function clampTimeoutSeconds(value: number): number {
 	if (!Number.isFinite(value)) {

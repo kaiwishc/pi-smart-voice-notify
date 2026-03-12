@@ -25,6 +25,7 @@ import {
 	SOUND_LOOPS,
 	STATUS_KEY,
 	summarizeConfig,
+	toRecord,
 	TTS_ENGINE_VALUES,
 	writeConfigToDisk,
 	boolValue,
@@ -100,13 +101,6 @@ function classifyToolResult(
 	}
 
 	return "error";
-}
-
-function toRecord(value: unknown): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		return {};
-	}
-	return value as Record<string, unknown>;
 }
 
 function readBlockedReason(value: unknown): string | null {

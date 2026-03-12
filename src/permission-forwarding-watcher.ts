@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { getErrorMessage } from "./logging.ts";
+import { toRecord } from "./config-store.ts";
 
 export type PermissionForwardingSource = "primary" | "legacy";
 export type ForwardedPermissionResolutionReason = "request_removed" | "watch_disabled" | "watcher_stopped";
@@ -51,13 +52,6 @@ interface PermissionForwardingWatcherOptions {
 interface TrackedForwardedPermissionRequest extends ForwardedPermissionRequestEvent {
 	requestKey: string;
 	lastSeenAt: number;
-}
-
-function toRecord(value: unknown): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		return {};
-	}
-	return value as Record<string, unknown>;
 }
 
 function normalizeRequestId(value: unknown, filePath: string): string {
