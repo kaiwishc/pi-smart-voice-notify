@@ -26,6 +26,9 @@ type PermissionForwardingWatcherController = ReturnType<PermissionForwardingWatc
 type ForwardedPermissionRequestEvent = Parameters<PermissionForwardingWatcherOptions["onRequest"]>[0];
 type ForwardedPermissionResolutionEvent = Parameters<PermissionForwardingWatcherOptions["onResolve"]>[0];
 type PermissionForwardingWatcherConfig = Parameters<PermissionForwardingWatcherController["start"]>[0];
+type EventBusHandler = (payload: unknown) => void;
+
+const PERMISSION_SYSTEM_EVENT_CHANNEL = "pi-permission-system:permission-request";
 
 const EMPTY_AVAILABILITY: TTSAvailability = {
 	"espeak-ng": false,
@@ -35,8 +38,30 @@ const EMPTY_AVAILABILITY: TTSAvailability = {
 	sapi: false,
 };
 
+class FakeEventBus {
+	private readonly handlers = new Map<string, EventBusHandler[]>();
+
+	public on(channel: string, handler: EventBusHandler): () => void {
+		const existing = this.handlers.get(channel) ?? [];
+		existing.push(handler);
+		this.handlers.set(channel, existing);
+		return () => {
+			const current = this.handlers.get(channel) ?? [];
+			this.handlers.set(channel, current.filter((entry) => entry !== handler));
+		};
+	}
+
+	public emit(channel: string, payload: unknown): void {
+		for (const handler of this.handlers.get(channel) ?? []) {
+			handler(payload);
+		}
+	}
+}
+
 class FakePi {
 	private readonly handlers = new Map<string, EventHandler[]>();
+
+	public readonly events = new FakeEventBus();
 
 	public on(eventName: string, handler: EventHandler): void {
 		const existing = this.handlers.get(eventName) ?? [];
@@ -223,6 +248,32 @@ function permissionEvent(toolCallId: string): { block: boolean; reason: string; 
 	};
 }
 
+function permissionSystemEvent(
+	state: "waiting" | "approved" | "denied",
+	requestId: string,
+	overrides: Partial<{
+		source: "tool_call" | "skill_input" | "skill_read";
+		message: string;
+		toolCallId: string;
+		toolName: string;
+		skillName: string;
+		path: string;
+		agentName: string | null;
+	}> = {},
+): Record<string, unknown> {
+	return {
+		requestId,
+		state,
+		source: overrides.source ?? "tool_call",
+		message: overrides.message ?? "Current agent requested tool 'write'. Allow this call?",
+		toolCallId: overrides.toolCallId,
+		toolName: overrides.toolName,
+		skillName: overrides.skillName,
+		path: overrides.path,
+		agentName: overrides.agentName ?? null,
+	};
+}
+
 function forwardedPermissionRequest(
 	requestId: string,
 	requesterAgentName = "Delegate Alpha",
@@ -286,6 +337,62 @@ async function tickAndFlush(milliseconds: number): Promise<void> {
 	await flushAsyncWork();
 	await flushAsyncWork();
 }
+
+test("permission-system waiting events trigger a permission notification and cancel on resolution", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness();
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-wait", {
+			toolCallId: "call-wait",
+			toolName: "write_file",
+		}),
+	);
+	await flushAsyncWork();
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("approved", "permission-wait", {
+			toolCallId: "call-wait",
+			toolName: "write_file",
+		}),
+	);
+	await flushAsyncWork();
+	await tickAndFlush(1_000);
+
+	assert.equal(countReminderCalls(ttsCalls), 0);
+});
+
+test("permission-system waiting events do not duplicate a later blocked tool_call notification", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness();
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-dedupe", {
+			toolCallId: "call-dedupe",
+			toolName: "write_file",
+		}),
+	);
+	await flushAsyncWork();
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+
+	await pi.emit("tool_call", permissionEvent("call-dedupe"), ctx);
+	await flushAsyncWork();
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+});
 
 test("tool_execution_start only cancels the resolved permission reminder flow", async (t) => {
 	disableFocusDetection(t);

@@ -1,6 +1,6 @@
 {
   "name": "pi-smart-voice-notify",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Windows-optimized smart voice, sound, and desktop notifications for Pi coding agent.",
   "type": "module",
   "main": "./index.ts",

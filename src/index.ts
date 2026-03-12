@@ -246,6 +246,67 @@ function forwardedPermissionReminderKey(requestId: string): ReminderKey {
 		: defaultReminderKey("permission");
 }
 
+const PERMISSION_SYSTEM_EVENT_CHANNEL = "pi-permission-system:permission-request";
+type PermissionSystemEventState = "waiting" | "approved" | "denied";
+type PermissionSystemEventSource = "tool_call" | "skill_input" | "skill_read";
+
+interface PermissionSystemEvent {
+	requestId: string;
+	state: PermissionSystemEventState;
+	source: PermissionSystemEventSource;
+	message: string;
+	toolCallId?: string;
+	toolName?: string;
+	skillName?: string;
+	path?: string;
+	agentName?: string | null;
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+	if (typeof value !== "string") {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readPermissionSystemEvent(value: unknown): PermissionSystemEvent | null {
+	const record = toRecord(value);
+	const requestId = normalizeOptionalString(record.requestId);
+	const state = normalizeOptionalString(record.state);
+	const source = normalizeOptionalString(record.source);
+	const message = normalizeOptionalString(record.message);
+	if (!requestId || !message) {
+		return null;
+	}
+	if (state !== "waiting" && state !== "approved" && state !== "denied") {
+		return null;
+	}
+	if (source !== "tool_call" && source !== "skill_input" && source !== "skill_read") {
+		return null;
+	}
+
+	return {
+		requestId,
+		state,
+		source,
+		message,
+		toolCallId: normalizeOptionalString(record.toolCallId),
+		toolName: normalizeOptionalString(record.toolName),
+		skillName: normalizeOptionalString(record.skillName),
+		path: normalizeOptionalString(record.path),
+		agentName: typeof record.agentName === "string" ? record.agentName : null,
+	};
+}
+
+function permissionSystemReminderKey(event: PermissionSystemEvent): ReminderKey {
+	if (event.toolCallId) {
+		return permissionReminderKey(event.toolCallId);
+	}
+
+	return `permission:request:${event.requestId}`;
+}
+
 export default function smartVoiceNotifyExtension(
 	pi: ExtensionAPI,
 	dependencies: SmartVoiceNotifyDependencies = {},
@@ -1020,6 +1081,57 @@ export default function smartVoiceNotifyExtension(
 			logError,
 		);
 	};
+
+	pi.events.on(PERMISSION_SYSTEM_EVENT_CHANNEL, (payload: unknown) => {
+		const event = readPermissionSystemEvent(payload);
+		if (!event) {
+			return;
+		}
+		if (!config.enabled || !config.enablePermissionNotification) {
+			return;
+		}
+		if (!activeSessionContext) {
+			logger.debug("permission_system.notification_skipped", {
+				reason: "missing_session_context",
+				requestId: event.requestId,
+				state: event.state,
+				source: event.source,
+			});
+			return;
+		}
+
+		const reminderKey = permissionSystemReminderKey(event);
+		if (event.state === "waiting") {
+			if (event.toolCallId) {
+				pendingPermissionToolCallIds.add(event.toolCallId);
+				rememberScopedToolCallId(event.toolCallId, blockedPermissionToolCallIds);
+			}
+			logger.debug("permission_system.wait_detected", {
+				requestId: event.requestId,
+				toolCallId: event.toolCallId ?? null,
+				toolName: event.toolName ?? null,
+				skillName: event.skillName ?? null,
+				source: event.source,
+			});
+			triggerNotification("permission", activeSessionContext, {
+				reason: event.message,
+				reminderKey,
+			});
+			return;
+		}
+
+		if (event.toolCallId) {
+			pendingPermissionToolCallIds.delete(event.toolCallId);
+		}
+		cancelReminderActivityForKey(reminderKey, "permission_system_wait_resolved", {
+			requestId: event.requestId,
+			toolCallId: event.toolCallId ?? null,
+			toolName: event.toolName ?? null,
+			skillName: event.skillName ?? null,
+			state: event.state,
+			source: event.source,
+		});
+	});
 
 	const applySetting = (draft: VoiceNotifyConfig, id: string, value: string): void => {
 		switch (id) {

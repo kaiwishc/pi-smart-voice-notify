@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.3] - 2026-03-13
+
+### Added
+- Integration with `pi-permission-system:permission-request` event channel for permission request notifications
+- Automatic cancellation of permission reminders when approval/denial is received from the permission system
+- Deduplication to prevent duplicate notifications when permission system events precede tool_call events
+- New test coverage for permission system event integration
+
+### Changed
+- Refactored to use shared `toRecord` utility from `pi-permission-system`, removing duplicate implementation
+
 ## [0.2.2] - 2026-03-12
 
 ### Changed
