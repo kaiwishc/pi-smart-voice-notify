@@ -29,6 +29,7 @@ type PermissionForwardingWatcherConfig = Parameters<PermissionForwardingWatcherC
 type EventBusHandler = (payload: unknown) => void;
 
 const PERMISSION_SYSTEM_EVENT_CHANNEL = "pi-permission-system:permission-request";
+const PERMISSION_BATCH_WINDOW_MS = 800;
 
 const EMPTY_AVAILABILITY: TTSAvailability = {
 	"espeak-ng": false,
@@ -124,6 +125,28 @@ class FakePermissionForwardingWatcher implements PermissionForwardingWatcherCont
 
 function createTestConfig(overrides: Partial<VoiceNotifyConfig> = {}): VoiceNotifyConfig {
 	const baseConfig = structuredClone(DEFAULT_CONFIG);
+	const reminderDelaySeconds = overrides.reminderDelaySeconds ?? 1;
+	const followUpEnabled = overrides.followUpEnabled ?? false;
+	const maxFollowUps = overrides.maxFollowUps ?? baseConfig.maxFollowUps;
+	const followUpBackoffMultiplier =
+		overrides.followUpBackoffMultiplier ?? baseConfig.followUpBackoffMultiplier;
+	const reminderIntervals =
+		overrides.reminderIntervals ??
+		{
+			defaultSeconds: reminderDelaySeconds,
+			idleSeconds: reminderDelaySeconds,
+			permissionSeconds: reminderDelaySeconds,
+			questionSeconds: reminderDelaySeconds,
+			errorSeconds: reminderDelaySeconds,
+		};
+	const reminderEscalation =
+		overrides.reminderEscalation ??
+		{
+			enabled: followUpEnabled,
+			maxFollowUps,
+			backoffMultiplier: followUpBackoffMultiplier,
+		};
+
 	return {
 		...baseConfig,
 		enabled: true,
@@ -137,8 +160,12 @@ function createTestConfig(overrides: Partial<VoiceNotifyConfig> = {}): VoiceNoti
 		notificationMode: "tts-first",
 		wakeMonitor: false,
 		reminderEnabled: true,
-		reminderDelaySeconds: 1,
-		followUpEnabled: false,
+		reminderDelaySeconds,
+		followUpEnabled,
+		maxFollowUps,
+		followUpBackoffMultiplier,
+		reminderIntervals,
+		reminderEscalation,
 		minNotificationIntervalMs: 0,
 		...overrides,
 	};
@@ -208,7 +235,10 @@ function createControlledTTSService(): { calls: SpeakCall[]; service: TTSService
 	return { calls, service };
 }
 
-function createHarness(configOverrides: Partial<VoiceNotifyConfig> = {}): {
+function createHarness(
+	configOverrides: Partial<VoiceNotifyConfig> = {},
+	dependencyOverrides: Partial<SmartVoiceNotifyDependencies> = {},
+): {
 	ctx: FakeContext;
 	forwardingWatcher: FakePermissionForwardingWatcher;
 	pi: FakePi;
@@ -225,6 +255,7 @@ function createHarness(configOverrides: Partial<VoiceNotifyConfig> = {}): {
 			forwardingWatcher = new FakePermissionForwardingWatcher(options);
 			return forwardingWatcher;
 		},
+		...dependencyOverrides,
 	});
 
 	if (!forwardingWatcher) {
@@ -308,9 +339,9 @@ function reminderCalls(calls: SpeakCall[]): SpeakCall[] {
 	return calls.filter((call) => call.signal);
 }
 
-function disableFocusDetection(t: TestContext): void {
+function setFocusDetection(t: TestContext, value: "0" | "1"): void {
 	const previousFocusDetection = process.env.PI_SMART_NOTIFY_FOCUS_DETECTION;
-	process.env.PI_SMART_NOTIFY_FOCUS_DETECTION = "0";
+	process.env.PI_SMART_NOTIFY_FOCUS_DETECTION = value;
 	t.after(() => {
 		if (previousFocusDetection === undefined) {
 			delete process.env.PI_SMART_NOTIFY_FOCUS_DETECTION;
@@ -318,6 +349,14 @@ function disableFocusDetection(t: TestContext): void {
 		}
 		process.env.PI_SMART_NOTIFY_FOCUS_DETECTION = previousFocusDetection;
 	});
+}
+
+function disableFocusDetection(t: TestContext): void {
+	setFocusDetection(t, "0");
+}
+
+function enableFocusDetection(t: TestContext): void {
+	setFocusDetection(t, "1");
 }
 
 function useMockClock(t: TestContext): void {
@@ -338,6 +377,168 @@ async function tickAndFlush(milliseconds: number): Promise<void> {
 	await flushAsyncWork();
 }
 
+test("skipWhenFocused=false still notifies even when the terminal is focused", async (t) => {
+	enableFocusDetection(t);
+	useMockClock(t);
+
+	const focusChecks: Array<{ cacheTtlMs?: number }> = [];
+	const { ctx, pi, ttsCalls } = createHarness(
+		{
+			skipWhenFocused: false,
+			focusCacheTtlMs: 975,
+		},
+		{
+			isTerminalFocused: async (options) => {
+				focusChecks.push({ cacheTtlMs: options.cacheTtlMs });
+				return true;
+			},
+		},
+	);
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit("tool_call", permissionEvent("call-focus-disabled"), ctx);
+	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assert.equal(focusChecks.length, 0);
+});
+
+test("skipWhenFocused=true suppresses focused notifications and uses config focus cache ttl", async (t) => {
+	enableFocusDetection(t);
+	useMockClock(t);
+
+	const focusChecks: Array<{ cacheTtlMs?: number }> = [];
+	const { ctx, pi, ttsCalls } = createHarness(
+		{
+			skipWhenFocused: true,
+			focusCacheTtlMs: 975,
+		},
+		{
+			isTerminalFocused: async (options) => {
+				focusChecks.push({ cacheTtlMs: options.cacheTtlMs });
+				return true;
+			},
+		},
+	);
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit("tool_call", permissionEvent("call-focus-enabled"), ctx);
+	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
+	assert.equal(focusChecks.length, 1);
+	assert.equal(focusChecks[0]?.cacheTtlMs, 975);
+});
+
+test("initializeTTSService receives the full configured TTS settings", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const capturedConfigs: Array<Partial<TTSConfig> | undefined> = [];
+	const { service } = createControlledTTSService();
+	const { ctx, pi } = createHarness(
+		{
+			enableTts: false,
+			ttsEngine: "openai",
+			fallbackChain: ["openai", "edge"],
+			commandTimeoutMs: 45_000,
+			edgeVoice: "en-US-AvaNeural",
+			edgeRate: "+20%",
+			edgePitch: "+4Hz",
+			edgeVolume: "+10%",
+			espeakVoice: "en-us",
+			espeakRate: 210,
+			espeakPitch: 60,
+			elevenLabsApiKey: "test-elevenlabs-key",
+			elevenLabsVoiceId: "voice-123",
+			elevenLabsModel: "eleven_multilingual_v2",
+			elevenLabsStability: 0.7,
+			elevenLabsSimilarity: 0.8,
+			elevenLabsStyle: 0.6,
+			openaiTtsEndpoint: "https://example.invalid/v1/audio/speech",
+			openaiTtsApiKey: "test-openai-key",
+			openaiTtsModel: "tts-1-hd",
+			openaiTtsVoice: "nova",
+			openaiTtsFormat: "wav",
+			openaiTtsSpeed: 1.25,
+			ttsVoice: "Generic TTS Voice",
+			ttsRate: 1,
+			sapiVoice: "Dedicated SAPI Voice",
+			sapiRate: 4,
+		},
+		{
+			initializeTTSService: (options) => {
+				capturedConfigs.push(options?.config);
+				return service;
+			},
+		},
+	);
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+
+	const latestConfig = capturedConfigs.at(-1);
+	assert.ok(latestConfig);
+	assert.equal(latestConfig?.enableTts, false);
+	assert.equal(latestConfig?.ttsEngine, "openai");
+	assert.deepEqual(latestConfig?.fallbackChain, ["openai", "edge"]);
+	assert.equal(latestConfig?.commandTimeoutMs, 45_000);
+	assert.equal(latestConfig?.edgeVoice, "en-US-AvaNeural");
+	assert.equal(latestConfig?.edgeRate, "+20%");
+	assert.equal(latestConfig?.edgePitch, "+4Hz");
+	assert.equal(latestConfig?.edgeVolume, "+10%");
+	assert.equal(latestConfig?.espeakVoice, "en-us");
+	assert.equal(latestConfig?.espeakRate, 210);
+	assert.equal(latestConfig?.espeakPitch, 60);
+	assert.equal(latestConfig?.elevenLabsApiKey, "test-elevenlabs-key");
+	assert.equal(latestConfig?.elevenLabsVoiceId, "voice-123");
+	assert.equal(latestConfig?.elevenLabsModel, "eleven_multilingual_v2");
+	assert.equal(latestConfig?.elevenLabsStability, 0.7);
+	assert.equal(latestConfig?.elevenLabsSimilarity, 0.8);
+	assert.equal(latestConfig?.elevenLabsStyle, 0.6);
+	assert.equal(latestConfig?.openaiTtsEndpoint, "https://example.invalid/v1/audio/speech");
+	assert.equal(latestConfig?.openaiTtsApiKey, "test-openai-key");
+	assert.equal(latestConfig?.openaiTtsModel, "tts-1-hd");
+	assert.equal(latestConfig?.openaiTtsVoice, "nova");
+	assert.equal(latestConfig?.openaiTtsFormat, "wav");
+	assert.equal(latestConfig?.openaiTtsSpeed, 1.25);
+	assert.equal(latestConfig?.sapiVoice, "Dedicated SAPI Voice");
+	assert.equal(latestConfig?.sapiRate, 4);
+});
+
+test("permission reminders use the permission-specific reminder interval", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness({
+		reminderDelaySeconds: 1,
+		reminderIntervals: {
+			...structuredClone(DEFAULT_CONFIG.reminderIntervals),
+			defaultSeconds: 1,
+			permissionSeconds: 3,
+		},
+	});
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit("tool_call", permissionEvent("call-permission-reminder-delay"), ctx);
+	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assert.equal(countReminderCalls(ttsCalls), 0);
+
+	await tickAndFlush(2_999);
+	assert.equal(countReminderCalls(ttsCalls), 0);
+
+	await tickAndFlush(1);
+	assert.equal(countReminderCalls(ttsCalls), 1);
+});
+
 test("permission-system waiting events trigger a permission notification and cancel on resolution", async (t) => {
 	disableFocusDetection(t);
 	useMockClock(t);
@@ -354,6 +555,7 @@ test("permission-system waiting events trigger a permission notification and can
 		}),
 	);
 	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
 
@@ -386,6 +588,7 @@ test("permission-system waiting events do not duplicate a later blocked tool_cal
 		}),
 	);
 	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
 
 	await pi.emit("tool_call", permissionEvent("call-dedupe"), ctx);
@@ -409,6 +612,7 @@ test("tool_execution_start only cancels the resolved permission reminder flow", 
 
 	assert.equal(countReminderCalls(ttsCalls), 0);
 
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	await tickAndFlush(1_000);
 	const activeReminderCalls = reminderCalls(ttsCalls);
 	assert.equal(activeReminderCalls.length, 1);
@@ -440,6 +644,7 @@ test("tool_result resolution keeps another permission reminder active while drop
 	await flushAsyncWork();
 	await pi.emit("tool_call", permissionEvent("call-b"), ctx);
 	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	await tickAndFlush(1_000);
 
 	const pendingReminderCalls = reminderCalls(ttsCalls);
@@ -469,6 +674,7 @@ test("tool_result with the same toolCallId still classifies after a permission-b
 	await flushAsyncWork();
 	await pi.emit("tool_call", permissionEvent("call-shared"), ctx);
 	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
 
 	await pi.emit(
@@ -499,6 +705,7 @@ test("forwarded permission resolution cancels a queued reminder before it fires"
 	await flushAsyncWork();
 	forwardingWatcher.emitRequest(forwardedPermissionRequest("forwarded-queued", "Builder Beta"));
 	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
 	const initialCalls = immediateNotificationCalls(ttsCalls);
 	assert.equal(initialCalls.length, 1);
@@ -523,6 +730,7 @@ test("forwarded permission resolution aborts active reminder playback for that r
 	await flushAsyncWork();
 	forwardingWatcher.emitRequest(forwardedPermissionRequest("forwarded-active"));
 	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	await tickAndFlush(1_000);
 
 	const activeReminderCalls = reminderCalls(ttsCalls);

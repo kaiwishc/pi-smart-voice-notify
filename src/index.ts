@@ -6,7 +6,7 @@ import type {
 import type { SettingItem } from "@mariozechner/pi-tui";
 import { basename } from "node:path";
 
-import { initializeAIMessageService } from "./ai-messages.ts";
+import { initializeAIMessageService, type AIMessageConfig } from "./ai-messages.ts";
 import {
 	BOOLEAN_VALUES,
 	clampInt,
@@ -47,8 +47,8 @@ import type {
 	ReminderState,
 	VoiceNotifyConfig,
 } from "./types.ts";
-import type { TTSService } from "./types/tts.ts";
-import { createWebhookService } from "./webhook.ts";
+import type { TTSConfig, TTSService } from "./types/tts.ts";
+import { createWebhookService, type WebhookConfig } from "./webhook.ts";
 import { ZellijModal, ZellijSettingsModal } from "./zellij-modal.ts";
 
 function pickRandom<T>(items: readonly T[]): T {
@@ -226,6 +226,7 @@ export interface SmartVoiceNotifyDependencies {
 	createPermissionForwardingWatcher?: (
 		options: ConstructorParameters<typeof PermissionForwardingWatcher>[0],
 	) => PermissionForwardingWatcherController;
+	isTerminalFocused?: typeof isTerminalFocused;
 }
 
 function defaultReminderKey(type: NotificationType): ReminderKey {
@@ -334,6 +335,16 @@ export default function smartVoiceNotifyExtension(
 	const processedToolResultToolCallIds = new Set<string>();
 	const lastNotificationAt = new Map<NotificationType, number>();
 
+	// Batch near-simultaneous permission requests so we don't spam sound/toasts when the agent
+	// issues multiple tool calls that all require approval at once.
+	const permissionBatchWindowMs = Math.max(0, envInteger(800, "PI_SMART_NOTIFY_PERMISSION_BATCH_WINDOW_MS"));
+	let permissionBatchTimeout: NodeJS.Timeout | null = null;
+	let permissionBatchContext: ExtensionContext | null = null;
+	let permissionBatchGeneration = 0;
+	type PermissionBatchEntry = { reminderKey: ReminderKey; reason?: string; customMessage?: string };
+	const pendingPermissionBatch = new Map<ReminderKey, PermissionBatchEntry>();
+	const resolvedPermissionBatchKeys = new Set<ReminderKey>();
+
 	const logger = createExtensionLogger({
 		extensionId: EXTENSION_ID,
 		debugLogPath: DEBUG_LOG_PATH,
@@ -347,57 +358,133 @@ export default function smartVoiceNotifyExtension(
 		debug: logger.debug,
 	});
 	const projectName = basename(process.cwd()) || "project";
-	const focusDetectionEnabled = envBoolean(process.platform === "linux", "PI_SMART_NOTIFY_FOCUS_DETECTION");
+	const detectTerminalFocus = dependencies.isTerminalFocused ?? isTerminalFocused;
+	const focusDetectionEnabled = envBoolean(
+		process.platform === "linux" || process.platform === "win32",
+		"PI_SMART_NOTIFY_FOCUS_DETECTION",
+	);
 	const notifyWhenFocused = envBoolean(false, "PI_SMART_NOTIFY_NOTIFY_WHEN_FOCUSED");
-	const focusCacheTtlMs = Math.max(100, envInteger(400, "PI_SMART_NOTIFY_FOCUS_CACHE_TTL_MS"));
 	const focusTimeoutMs = Math.max(500, envInteger(1_500, "PI_SMART_NOTIFY_FOCUS_TIMEOUT_MS"));
-	const enablePerProjectSounds = envBoolean(true, "PI_SMART_NOTIFY_ENABLE_PER_PROJECT_SOUNDS");
-	const soundThemeName = envString("PI_SMART_NOTIFY_SOUND_THEME", "PI_SMART_NOTIFY_THEME_NAME");
-	const soundThemeDirectory = envString("PI_SMART_NOTIFY_SOUND_THEME_DIR", "PI_SMART_NOTIFY_THEME_DIR");
-	const themesRootDirectory = envString("PI_SMART_NOTIFY_THEMES_ROOT");
-	const themeConfigPath = envString("PI_SMART_NOTIFY_THEME_CONFIG_PATH");
-	const customSoundDirectories = envString("PI_SMART_NOTIFY_CUSTOM_SOUND_DIRS")
-		.split(",")
-		.map((value) => value.trim())
-		.filter((value) => value.length > 0);
 	const soundThemeService = new SoundThemeService({
 		debugLog: (message) => {
 			logger.debug("sound_theme.debug", { message });
 		},
 	});
+	const buildTTSServiceConfig = (): TTSConfig => {
+		return {
+			enableTts: config.enableTts,
+			ttsEngine: config.ttsEngine,
+			fallbackChain: [...config.fallbackChain],
+			commandTimeoutMs: config.commandTimeoutMs,
+			edgeVoice: config.edgeVoice,
+			edgeRate: config.edgeRate,
+			edgePitch: config.edgePitch,
+			edgeVolume: config.edgeVolume,
+			espeakVoice: config.espeakVoice,
+			espeakRate: config.espeakRate,
+			espeakPitch: config.espeakPitch,
+			elevenLabsApiKey: config.elevenLabsApiKey,
+			elevenLabsVoiceId: config.elevenLabsVoiceId,
+			elevenLabsModel: config.elevenLabsModel,
+			elevenLabsStability: config.elevenLabsStability,
+			elevenLabsSimilarity: config.elevenLabsSimilarity,
+			elevenLabsStyle: config.elevenLabsStyle,
+			openaiTtsEndpoint: config.openaiTtsEndpoint,
+			openaiTtsApiKey: config.openaiTtsApiKey,
+			openaiTtsModel: config.openaiTtsModel,
+			openaiTtsVoice: config.openaiTtsVoice,
+			openaiTtsFormat: config.openaiTtsFormat,
+			openaiTtsSpeed: config.openaiTtsSpeed,
+			sapiVoice: config.sapiVoice,
+			sapiRate: config.sapiRate,
+		};
+	};
+	const buildAIMessageConfig = (): AIMessageConfig => {
+		const aiSettings = config.aiMessages;
+		return {
+			enableAIMessages: aiSettings.enabled,
+			aiEndpoint: aiSettings.endpoint,
+			aiModel: aiSettings.model,
+			aiApiKey: aiSettings.apiKey,
+			aiTimeoutMs: aiSettings.timeoutMs,
+			aiTemperature: aiSettings.temperature,
+			aiMaxTokens: aiSettings.maxTokens,
+			aiFallbackToTemplates: aiSettings.fallbackToTemplates,
+			personality: aiSettings.personality,
+			tone: aiSettings.tone,
+			enableMessageCache: aiSettings.caching.enabled,
+			messageCacheTtlMs: aiSettings.caching.ttlMs,
+			maxCacheEntries: aiSettings.caching.maxEntries,
+			templates: aiSettings.templates,
+		};
+	};
+	const buildWebhookConfig = (): WebhookConfig => {
+		return {
+			enabled: config.webhook.enabled,
+			discordWebhookUrl: config.webhook.discordUrl,
+			genericWebhookUrl: config.webhook.genericUrl,
+			eventAllowList: [...config.webhook.events],
+			eventTriggers: {
+				idle: config.enableIdleNotification,
+				permission: config.enablePermissionNotification,
+				question: config.enableQuestionNotification,
+				error: config.enableErrorNotification,
+			},
+			minIntervalMs: config.webhook.minIntervalMs,
+			maxRetries: config.webhook.maxRetries,
+			requestTimeoutMs: config.webhook.requestTimeoutMs,
+			discordUsername: config.webhook.username,
+			logger: (message, details = {}) => {
+				logger.debug(`webhook.${message}`, details);
+			},
+		};
+	};
+	const buildSoundThemeConfig = (): SoundThemeConfig => {
+		const configuredCustomSoundDirectories = config.customSoundDirectories
+			.map((value) => value.trim())
+			.filter((value) => value.length > 0);
+		const configuredSoundFiles: NonNullable<SoundThemeConfig["soundFiles"]> = {};
+		const notificationSound = normalizeOptionalString(config.questionSoundFile);
+		const successSound = normalizeOptionalString(config.idleSoundFile);
+		const alertSound = normalizeOptionalString(config.permissionSoundFile);
+		const errorSound = normalizeOptionalString(config.errorSoundFile);
+		if (notificationSound) {
+			configuredSoundFiles.notification = notificationSound;
+		}
+		if (successSound) {
+			configuredSoundFiles.success = successSound;
+		}
+		if (alertSound) {
+			configuredSoundFiles.alert = alertSound;
+		}
+		if (errorSound) {
+			configuredSoundFiles.error = errorSound;
+		}
+		return {
+			themeName: normalizeOptionalString(config.themeName),
+			themeDirectory: normalizeOptionalString(config.themePath),
+			themesRootDirectory: normalizeOptionalString(config.themesRootPath),
+			themeConfigPath: normalizeOptionalString(config.themeConfigPath),
+			projectCwd: process.cwd(),
+			enablePerProjectSounds: config.enablePerProjectSounds,
+			randomizeSounds: config.randomizeThemeSounds,
+			defaultVolume: config.themeDefaultVolume,
+			soundFiles: Object.keys(configuredSoundFiles).length > 0 ? configuredSoundFiles : undefined,
+			customSoundDirectories: configuredCustomSoundDirectories.length > 0 ? configuredCustomSoundDirectories : undefined,
+		};
+	};
 	let ttsService = createTTSService({
 		execRunner: pi,
-		config: {
-			ttsEngine: config.ttsEngine,
-			enableTts: true,
-			sapiVoice: config.ttsVoice,
-			sapiRate: config.ttsRate,
-		},
+		config: buildTTSServiceConfig(),
 		debug: logger.debug,
 	});
 	const aiMessageService = initializeAIMessageService({
-		config: {
-			enableAIMessages: envBoolean(false, "PI_SMART_NOTIFY_AI_ENABLED"),
-			aiEndpoint: envString("PI_SMART_NOTIFY_AI_ENDPOINT", "OPENAI_BASE_URL") || "http://localhost:11434/v1",
-			aiModel: envString("PI_SMART_NOTIFY_AI_MODEL") || "llama3",
-			aiApiKey: envString("PI_SMART_NOTIFY_AI_API_KEY", "OPENAI_API_KEY"),
-		},
+		config: buildAIMessageConfig(),
 		debugLog: (message, details = {}) => {
 			logger.debug(`ai_messages.${message}`, details);
 		},
 	});
-	const webhookService = createWebhookService({
-		enabled: envBoolean(false, "PI_SMART_NOTIFY_WEBHOOK_ENABLED", "WEBHOOK_ENABLED"),
-		eventTriggers: {
-			idle: config.enableIdleNotification,
-			permission: config.enablePermissionNotification,
-			question: config.enableQuestionNotification,
-			error: config.enableErrorNotification,
-		},
-		logger: (message, details = {}) => {
-			logger.debug(`webhook.${message}`, details);
-		},
-	});
+	const webhookService = createWebhookService(buildWebhookConfig());
 	const linuxSession = detectLinuxSession();
 	logger.debug("linux.session.detected", {
 		sessionType: linuxSession.sessionType,
@@ -429,10 +516,10 @@ export default function smartVoiceNotifyExtension(
 				requesterAgentName: sanitizeAgentName(event.requesterAgentName),
 				filePath: event.filePath,
 			});
-			triggerNotification("permission", activeSessionContext, {
+			queuePermissionNotification(activeSessionContext, {
+				reminderKey: forwardedPermissionReminderKey(event.requestId),
 				reason: `forwarded_permission:${event.requestId}`,
 				customMessage,
-				reminderKey: forwardedPermissionReminderKey(event.requestId),
 			});
 		},
 		onResolve: (event) => {
@@ -443,8 +530,14 @@ export default function smartVoiceNotifyExtension(
 				filePath: event.filePath,
 				reason: event.reason,
 			});
+			const reminderKey = forwardedPermissionReminderKey(event.requestId);
+			removePermissionFromBatch(reminderKey, "forwarded_permission_resolved", {
+				requestId: event.requestId,
+				source: event.source,
+				resolutionReason: event.reason,
+			});
 			cancelReminderActivityForKey(
-				forwardedPermissionReminderKey(event.requestId),
+				reminderKey,
 				"forwarded_permission_resolved",
 				{
 					requestId: event.requestId,
@@ -469,37 +562,14 @@ export default function smartVoiceNotifyExtension(
 		});
 	};
 
-	const buildSoundThemeConfig = (): SoundThemeConfig => {
-		return {
-			themeName: soundThemeName || undefined,
-			themeDirectory: soundThemeDirectory || undefined,
-			themesRootDirectory: themesRootDirectory || undefined,
-			themeConfigPath: themeConfigPath || undefined,
-			projectCwd: process.cwd(),
-			enablePerProjectSounds,
-			customSoundDirectories: customSoundDirectories.length > 0 ? customSoundDirectories : undefined,
-		};
-	};
-
 	const refreshIntegratedServiceConfig = (): void => {
 		ttsService = createTTSService({
 			execRunner: pi,
-			config: {
-				ttsEngine: config.ttsEngine,
-				enableTts: true,
-				sapiVoice: config.ttsVoice,
-				sapiRate: config.ttsRate,
-			},
+			config: buildTTSServiceConfig(),
 			debug: logger.debug,
 		});
-		webhookService.updateConfig({
-			eventTriggers: {
-				idle: config.enableIdleNotification,
-				permission: config.enablePermissionNotification,
-				question: config.enableQuestionNotification,
-				error: config.enableErrorNotification,
-			},
-		});
+		aiMessageService.updateConfig(buildAIMessageConfig());
+		webhookService.updateConfig(buildWebhookConfig());
 	};
 
 	const rememberScopedToolCallId = (toolCallId: string, seenToolCallIds: Set<string>): boolean => {
@@ -629,7 +699,13 @@ export default function smartVoiceNotifyExtension(
 		if (!pendingPermissionToolCallIds.delete(toolCallId)) {
 			return;
 		}
-		cancelReminderActivityForKey(permissionReminderKey(toolCallId), "permission_interaction_resolved", {
+		const reminderKey = permissionReminderKey(toolCallId);
+		removePermissionFromBatch(reminderKey, "permission_interaction_resolved", {
+			toolCallId,
+			stage,
+			...details,
+		});
+		cancelReminderActivityForKey(reminderKey, "permission_interaction_resolved", {
 			toolCallId,
 			stage,
 			...details,
@@ -647,14 +723,14 @@ export default function smartVoiceNotifyExtension(
 	};
 
 	const shouldSkipFocusedNotification = async (type: NotificationType): Promise<boolean> => {
-		if (!focusDetectionEnabled || notifyWhenFocused || process.platform !== "linux") {
+		if (!config.skipWhenFocused || !focusDetectionEnabled || notifyWhenFocused) {
 			return false;
 		}
 
 		try {
-			const focused = await isTerminalFocused({
+			const focused = await detectTerminalFocus({
 				debug: config.debugLog,
-				cacheTtlMs: focusCacheTtlMs,
+				cacheTtlMs: config.focusCacheTtlMs,
 				timeoutMs: focusTimeoutMs,
 				logger: (message, details = {}) => {
 					logger.debug("focus.detect", {
@@ -780,8 +856,8 @@ export default function smartVoiceNotifyExtension(
 
 		const spoken = await ttsService.speak(message, config.ttsEngine, {
 			signal,
-			sapiVoice: config.ttsVoice,
-			sapiRate: config.ttsRate,
+			sapiVoice: config.sapiVoice,
+			sapiRate: config.sapiRate,
 		});
 		if (spoken || signal?.aborted) {
 			return spoken;
@@ -847,6 +923,7 @@ export default function smartVoiceNotifyExtension(
 				title: `Pi Notification - ${type}`,
 				message,
 				projectName,
+				mention: type === "permission" && config.webhook.mentionOnPermission ? true : undefined,
 			});
 			logger.debug("webhook.dispatch", {
 				type,
@@ -859,6 +936,30 @@ export default function smartVoiceNotifyExtension(
 				error: getErrorMessage(error),
 			});
 		}
+	};
+
+	const getReminderDelaySeconds = (type: NotificationType): number => {
+		const typeDelaySeconds =
+			type === "idle"
+				? config.reminderIntervals.idleSeconds
+				: type === "permission"
+					? config.reminderIntervals.permissionSeconds
+					: type === "question"
+						? config.reminderIntervals.questionSeconds
+						: config.reminderIntervals.errorSeconds;
+		const defaultDelaySeconds = config.reminderIntervals.defaultSeconds || config.reminderDelaySeconds;
+		const defaultTypeDelaySeconds =
+			type === "idle"
+				? DEFAULT_CONFIG.reminderIntervals.idleSeconds
+				: type === "permission"
+					? DEFAULT_CONFIG.reminderIntervals.permissionSeconds
+					: type === "question"
+						? DEFAULT_CONFIG.reminderIntervals.questionSeconds
+						: DEFAULT_CONFIG.reminderIntervals.errorSeconds;
+		const shouldUseGlobalDefaultDelay =
+			defaultDelaySeconds !== DEFAULT_CONFIG.reminderIntervals.defaultSeconds &&
+			typeDelaySeconds === defaultTypeDelaySeconds;
+		return Math.max(1, shouldUseGlobalDefaultDelay ? defaultDelaySeconds : typeDelaySeconds || defaultDelaySeconds);
 	};
 
 	const scheduleReminder = (
@@ -997,7 +1098,13 @@ export default function smartVoiceNotifyExtension(
 	const triggerNotification = (
 		type: NotificationType,
 		ctx: ExtensionContext,
-		options: { bypassThrottle?: boolean; customMessage?: string; reason?: string; reminderKey?: ReminderKey } = {},
+		options: {
+			bypassThrottle?: boolean;
+			customMessage?: string;
+			reason?: string;
+			reminderKey?: ReminderKey;
+			scheduleReminder?: boolean;
+		} = {},
 	): void => {
 		queueTask(
 			(async () => {
@@ -1076,10 +1183,138 @@ export default function smartVoiceNotifyExtension(
 
 					dispatchWebhook(type, spokenMessage);
 				});
-				scheduleReminder(options.reminderKey ?? defaultReminderKey(type), type, config.reminderDelaySeconds, 0);
+				if (options.scheduleReminder !== false) {
+					scheduleReminder(options.reminderKey ?? defaultReminderKey(type), type, getReminderDelaySeconds(type), 0);
+				}
 			})(),
 			logError,
 		);
+	};
+
+	const resetPermissionBatch = (reason: string): void => {
+		permissionBatchGeneration += 1;
+
+		if (permissionBatchTimeout) {
+			clearTimeout(permissionBatchTimeout);
+			permissionBatchTimeout = null;
+		}
+
+		const count = pendingPermissionBatch.size;
+		if (count > 0) {
+			pendingPermissionBatch.clear();
+		}
+		permissionBatchContext = null;
+		resolvedPermissionBatchKeys.clear();
+
+		if (count > 0) {
+			logger.debug("permission.batch.reset", { reason, count });
+		}
+	};
+
+	const removePermissionFromBatch = (
+		reminderKey: ReminderKey,
+		reason: string,
+		details: Record<string, unknown> = {},
+	): void => {
+		resolvedPermissionBatchKeys.add(reminderKey);
+		if (resolvedPermissionBatchKeys.size > 2000) {
+			resolvedPermissionBatchKeys.clear();
+			resolvedPermissionBatchKeys.add(reminderKey);
+		}
+
+		if (!pendingPermissionBatch.delete(reminderKey)) {
+			return;
+		}
+
+		logger.debug("permission.batch.removed", {
+			reason,
+			reminderKey,
+			remaining: pendingPermissionBatch.size,
+			...details,
+		});
+
+		if (pendingPermissionBatch.size === 0 && permissionBatchTimeout) {
+			clearTimeout(permissionBatchTimeout);
+			permissionBatchTimeout = null;
+			permissionBatchContext = null;
+			logger.debug("permission.batch.timer_cancelled", { reason, reminderKey });
+		}
+	};
+
+	const queuePermissionNotification = (ctx: ExtensionContext, entry: PermissionBatchEntry): void => {
+		if (!config.enabled || !isNotificationEnabled(config, "permission")) {
+			return;
+		}
+
+		permissionBatchContext = ctx;
+		pendingPermissionBatch.set(entry.reminderKey, entry);
+
+		if (permissionBatchTimeout) {
+			clearTimeout(permissionBatchTimeout);
+		}
+
+		const windowMs = Math.max(0, permissionBatchWindowMs);
+		const generation = permissionBatchGeneration;
+		permissionBatchTimeout = setTimeout(() => {
+			const batchCtx = permissionBatchContext;
+			const batch = Array.from(pendingPermissionBatch.values());
+			pendingPermissionBatch.clear();
+			permissionBatchTimeout = null;
+			permissionBatchContext = null;
+
+			queueTask(
+				(async () => {
+					if (!batchCtx || batch.length === 0) {
+						return;
+					}
+					if (!config.enabled || !isNotificationEnabled(config, "permission")) {
+						return;
+					}
+					if (generation !== permissionBatchGeneration) {
+						return;
+					}
+
+					if (await shouldSkipFocusedNotification("permission")) {
+						return;
+					}
+					if (generation !== permissionBatchGeneration) {
+						return;
+					}
+
+					const activeBatch = batch.filter(
+						(batchedEntry) => !resolvedPermissionBatchKeys.has(batchedEntry.reminderKey),
+					);
+					if (activeBatch.length === 0) {
+						return;
+					}
+
+					for (const batchedEntry of activeBatch) {
+						scheduleReminder(batchedEntry.reminderKey, "permission", getReminderDelaySeconds("permission"), 0);
+					}
+
+					const count = activeBatch.length;
+					logger.debug("permission.batch.fired", { count, windowMs });
+
+					if (count === 1) {
+						const first = activeBatch[0];
+						triggerNotification("permission", batchCtx, {
+							customMessage: first.customMessage,
+							reason: first.reason,
+							scheduleReminder: false,
+						});
+						return;
+					}
+
+					triggerNotification("permission", batchCtx, {
+						customMessage: `⚠️ ${count} permission requests are waiting for your approval.`,
+						reason: `permission_batch:${count}`,
+						scheduleReminder: false,
+					});
+				})(),
+				logError,
+			);
+		}, windowMs);
+		permissionBatchTimeout.unref?.();
 	};
 
 	pi.events.on(PERMISSION_SYSTEM_EVENT_CHANNEL, (payload: unknown) => {
@@ -1113,9 +1348,9 @@ export default function smartVoiceNotifyExtension(
 				skillName: event.skillName ?? null,
 				source: event.source,
 			});
-			triggerNotification("permission", activeSessionContext, {
-				reason: event.message,
+			queuePermissionNotification(activeSessionContext, {
 				reminderKey,
+				reason: event.message,
 			});
 			return;
 		}
@@ -1123,6 +1358,14 @@ export default function smartVoiceNotifyExtension(
 		if (event.toolCallId) {
 			pendingPermissionToolCallIds.delete(event.toolCallId);
 		}
+		removePermissionFromBatch(reminderKey, "permission_system_wait_resolved", {
+			requestId: event.requestId,
+			toolCallId: event.toolCallId ?? null,
+			toolName: event.toolName ?? null,
+			skillName: event.skillName ?? null,
+			state: event.state,
+			source: event.source,
+		});
 		cancelReminderActivityForKey(reminderKey, "permission_system_wait_resolved", {
 			requestId: event.requestId,
 			toolCallId: event.toolCallId ?? null,
@@ -1198,7 +1441,7 @@ export default function smartVoiceNotifyExtension(
 		const draft: VoiceNotifyConfig = { ...config };
 		const items = buildSettings(draft);
 		const overlayOptions = { anchor: "center" as const, width: 92, maxHeight: "85%" as const, margin: 1 };
-		const advancedConfigPath = "~/.pi/agent/extensions/pi-smart-voice-notify/config/config.json";
+		const advancedConfigPath = CONFIG_PATH;
 		const description = `Recommended settings only.\nFor advanced settings, manually edit: ${advancedConfigPath}`;
 
 		await ctx.ui.custom<void>(
@@ -1353,6 +1596,7 @@ export default function smartVoiceNotifyExtension(
 		blockedPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
 		lastNotificationAt.clear();
+		resetPermissionBatch("session_start");
 		cancelReminderActivity("session_start");
 		updateStatus(ctx);
 		logger.debug("session.start", {
@@ -1375,6 +1619,7 @@ export default function smartVoiceNotifyExtension(
 		blockedPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
 		lastNotificationAt.clear();
+		resetPermissionBatch("session_switch");
 		cancelReminderActivity("session_switch");
 		updateStatus(ctx);
 		logger.debug("session.switch", {});
@@ -1387,6 +1632,7 @@ export default function smartVoiceNotifyExtension(
 		pendingPermissionToolCallIds.clear();
 		blockedPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
+		resetPermissionBatch("session_shutdown");
 		cancelReminderActivity("session_shutdown");
 		clearFocusDetectCache();
 		clearProjectSoundCache();
@@ -1408,6 +1654,7 @@ export default function smartVoiceNotifyExtension(
 		pendingPermissionToolCallIds.clear();
 		blockedPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
+		resetPermissionBatch("agent_start");
 		logger.debug("agent.start", {});
 	});
 
@@ -1432,9 +1679,9 @@ export default function smartVoiceNotifyExtension(
 			toolName: event.toolName,
 			reason,
 		});
-		triggerNotification("permission", ctx, {
-			reason,
+		queuePermissionNotification(ctx, {
 			reminderKey: permissionReminderKey(event.toolCallId),
+			reason,
 		});
 		return {};
 	});

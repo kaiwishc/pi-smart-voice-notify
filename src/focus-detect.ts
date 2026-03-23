@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { getErrorMessage } from "./logging.ts";
 
 export type LinuxSessionType = "x11" | "wayland" | "unknown";
+type FocusSessionType = LinuxSessionType | "windows" | "unsupported";
 
 export interface FocusDetectOptions {
 	debug?: boolean;
@@ -15,7 +16,7 @@ interface FocusCacheState {
 	isFocused: boolean;
 	timestamp: number;
 	focusedWindow: string | null;
-	sessionType: LinuxSessionType;
+	sessionType: FocusSessionType;
 }
 
 interface SwayTreeNode {
@@ -44,7 +45,7 @@ const DEFAULT_TIMEOUT_MS = 1500;
 const DEFAULT_CACHE_TTL_MS = 400;
 const DEFAULT_MAX_BUFFER = 1024 * 1024;
 
-const TERMINAL_IDENTIFIERS = [
+const LINUX_TERMINAL_IDENTIFIERS = [
 	"wezterm",
 	"org.wezfurlong.wezterm",
 	"alacritty",
@@ -67,6 +68,74 @@ const TERMINAL_IDENTIFIERS = [
 	"gnome console",
 ] as const;
 
+const WINDOWS_TERMINAL_IDENTIFIERS = [
+	"windowsterminal",
+	"windows terminal",
+	"openconsole",
+	"conhost",
+	"cmd",
+	"command prompt",
+	"powershell",
+	"pwsh",
+	"bash",
+	"git bash",
+	"mintty",
+	"wezterm",
+	"wezterm-gui",
+	"alacritty",
+	"kitty",
+	"tabby",
+	"warp",
+	"rio",
+	"ghostty",
+	"hyper",
+] as const;
+
+const POWERSHELL_GET_FRONTMOST_PROCESS = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class Win32FocusDetect {
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out int processId);
+
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool IsIconic(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool IsWindowVisible(IntPtr hWnd);
+}
+"@
+
+$processId = 0
+$foregroundWindow = [Win32FocusDetect]::GetForegroundWindow()
+
+if ($foregroundWindow -eq [IntPtr]::Zero) {
+  return
+}
+
+if ([Win32FocusDetect]::IsIconic($foregroundWindow)) {
+  return
+}
+
+if (-not [Win32FocusDetect]::IsWindowVisible($foregroundWindow)) {
+  return
+}
+
+[Win32FocusDetect]::GetWindowThreadProcessId($foregroundWindow, [ref]$processId) | Out-Null
+if ($processId -le 0) {
+  return
+}
+
+Get-Process -Id $processId | Select-Object -ExpandProperty ProcessName
+`;
+
 let focusCache: FocusCacheState = {
 	isFocused: false,
 	timestamp: 0,
@@ -81,24 +150,15 @@ function emitLog(
 	details: Record<string, unknown> = {},
 ): void {
 	const logger = options.logger;
-
-	if (level === "debug") {
-		if (!options.debug) {
-			return;
-		}
-		if (logger) {
-			logger(message, details);
-			return;
-		}
-		console.debug("[focus-detect]", message, details);
+	if (!logger) {
 		return;
 	}
 
-	if (logger) {
-		logger(message, details);
+	if (level === "debug" && !options.debug) {
 		return;
 	}
-	console.warn("[focus-detect]", message, details);
+
+	logger(message, details);
 }
 
 export function detectLinuxSessionType(env: NodeJS.ProcessEnv = process.env): LinuxSessionType {
@@ -175,6 +235,16 @@ function parseQuotedValues(text: string): string[] {
 	return matches
 		.map((value) => value.slice(1, -1).trim())
 		.filter((value) => value.length > 0);
+}
+
+function getEncodedPowerShellScript(script: string): string {
+	return Buffer.from(script, "utf16le").toString("base64");
+}
+
+async function getFocusedWindowWindows(options: FocusDetectOptions): Promise<string | null> {
+	const encodedScript = getEncodedPowerShellScript(POWERSHELL_GET_FRONTMOST_PROCESS);
+	const command = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedScript}`;
+	return runCommand(command, "windows.powershell.frontmost_process", options, 1024);
 }
 
 async function getFocusedWindowX11(options: FocusDetectOptions): Promise<string | null> {
@@ -310,16 +380,16 @@ async function getFocusedWindowWayland(options: FocusDetectOptions): Promise<str
 }
 
 function normalize(value: string): string {
-	return value.toLowerCase().trim();
+	return value.toLowerCase().replace(/\.exe$/i, "").trim();
 }
 
-function isKnownTerminalWindow(value: string | null): boolean {
+function isKnownTerminalWindow(value: string | null, identifiers: readonly string[]): boolean {
 	if (!value) {
 		return false;
 	}
 
 	const normalized = normalize(value);
-	return TERMINAL_IDENTIFIERS.some((identifier) => normalized.includes(identifier));
+	return identifiers.some((identifier) => normalized.includes(normalize(identifier)));
 }
 
 export function clearFocusDetectCache(): void {
@@ -348,23 +418,38 @@ export async function isTerminalFocused(options: FocusDetectOptions = {}): Promi
 		return focusCache.isFocused;
 	}
 
-	const sessionType = detectLinuxSessionType();
-	emitLog("debug", "session.detected", options, { sessionType });
-
 	let focusedWindow: string | null = null;
-	if (sessionType === "x11") {
-		focusedWindow = await getFocusedWindowX11(options);
-	} else if (sessionType === "wayland") {
-		focusedWindow = await getFocusedWindowWayland(options);
+	let sessionType: FocusSessionType = "unsupported";
+	let isFocused = false;
+
+	if (process.platform === "win32") {
+		sessionType = "windows";
+		emitLog("debug", "platform.detected", options, { sessionType });
+		focusedWindow = await getFocusedWindowWindows(options);
+		isFocused = isKnownTerminalWindow(focusedWindow, WINDOWS_TERMINAL_IDENTIFIERS);
+	} else if (process.platform === "linux") {
+		sessionType = detectLinuxSessionType();
+		emitLog("debug", "session.detected", options, { sessionType });
+
+		if (sessionType === "x11") {
+			focusedWindow = await getFocusedWindowX11(options);
+		} else if (sessionType === "wayland") {
+			focusedWindow = await getFocusedWindowWayland(options);
+		} else {
+			emitLog("error", "unable to determine linux session type", options, {
+				XDG_SESSION_TYPE: process.env.XDG_SESSION_TYPE ?? null,
+				WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY ?? null,
+				DISPLAY: process.env.DISPLAY ?? null,
+			});
+		}
+
+		isFocused = isKnownTerminalWindow(focusedWindow, LINUX_TERMINAL_IDENTIFIERS);
 	} else {
-		emitLog("error", "unable to determine linux session type", options, {
-			XDG_SESSION_TYPE: process.env.XDG_SESSION_TYPE ?? null,
-			WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY ?? null,
-			DISPLAY: process.env.DISPLAY ?? null,
+		emitLog("debug", "platform.unsupported", options, {
+			platform: process.platform,
 		});
 	}
 
-	const isFocused = isKnownTerminalWindow(focusedWindow);
 	focusCache = {
 		isFocused,
 		timestamp: now,
