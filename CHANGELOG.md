@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0] - 2026-03-23
+
+### Added
+- Comprehensive test coverage for TTS and webhook configuration building
+- `buildTTSServiceConfig` and `buildWebhookServiceConfig` helper functions for modular config construction
+- Improved dependency injection for terminal focus detection
+
+### Changed
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.62.0
+- Refactored TTS configuration building to be more modular and testable
+- Improved notify-audio.ts with cleaner sound theme handling
+- Updated focus detection logic for better cross-platform support
+
+### Fixed
+- Replaced System.Windows.Media.MediaPlayer with P/Invoke to winmm.dll MCI API for reliable audio playback on Windows
+- MediaPlayer can fail when Windows Media Foundation is not properly installed or configured
+- Use mciSendString for notification audio playback with unique aliases per playback instance for concurrent safety
+- Use mciSendString for TTS playback with duration detection
+
+### Tests
+- Added comprehensive test cases for config building functions
+- Added tests for abortable commands and reminder playback
+
 ## [0.2.3] - 2026-03-13
 
 ### Added
