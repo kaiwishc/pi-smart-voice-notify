@@ -120,34 +120,47 @@ if ('${soundFileBase64}') {
 }
 
 try {
+  $playedFile = $false
+
   if ($path -and (Test-Path -LiteralPath $path)) {
-    Add-Type -AssemblyName PresentationCore
-    $player = New-Object System.Windows.Media.MediaPlayer
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class PiSmartVoiceNotifyWinMM {
+  [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+  public static extern int mciSendString(string command, StringBuilder buffer, int bufferSize, IntPtr hwndCallback);
+}
+'@ -Language CSharp
+
+    $alias = 'pi_notify_' + [Guid]::NewGuid().ToString('N')
+    $buffer = New-Object System.Text.StringBuilder 260
+
+    function Invoke-Mci([string]$command) {
+      [void]$buffer.Clear()
+      $result = [PiSmartVoiceNotifyWinMM]::mciSendString($command, $buffer, $buffer.Capacity, [IntPtr]::Zero)
+      if ($result -ne 0) {
+        throw "MCI command failed ($result): $command"
+      }
+      return $buffer.ToString()
+    }
+
     try {
-      $player.Volume = 1.0
+      [void](Invoke-Mci "open \`"$path\`" type mpegvideo alias $alias")
       for ($i = 0; $i -lt $loops; $i++) {
-        $player.Open([Uri]::new($path))
-
-        $openDeadline = (Get-Date).AddSeconds(3)
-        while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $openDeadline) {
-          Start-Sleep -Milliseconds 50
-        }
-
-        $durationMs = if ($player.NaturalDuration.HasTimeSpan) {
-          [Math]::Max(200, [Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds))
-        } else {
-          2500
-        }
-
-        $player.Position = [TimeSpan]::Zero
-        $player.Play()
-        Start-Sleep -Milliseconds $durationMs
-        $player.Stop()
+        [void](Invoke-Mci "seek $alias to start")
+        [void](Invoke-Mci "play $alias wait")
         Start-Sleep -Milliseconds 120
       }
+      $playedFile = $true
+    } catch {
+      $playedFile = $false
     } finally {
-      $player.Close()
+      [void][PiSmartVoiceNotifyWinMM]::mciSendString("close $alias", $null, 0, [IntPtr]::Zero)
     }
+  }
+
+  if ($playedFile) {
     exit 0
   }
 
@@ -183,8 +196,8 @@ try {
 		}
 
 		const textBase64 = Buffer.from(text, "utf8").toString("base64");
-		const voiceBase64 = Buffer.from(config.ttsVoice, "utf8").toString("base64");
-		const rate = clampInt(config.ttsRate, DEFAULT_CONFIG.ttsRate, -10, 10);
+		const voiceBase64 = Buffer.from(config.sapiVoice, "utf8").toString("base64");
+		const rate = clampInt(config.sapiRate, DEFAULT_CONFIG.sapiRate, -10, 10);
 
 		const script = `
 Add-Type -AssemblyName System.Speech
@@ -218,7 +231,7 @@ try {
 	public async getInstalledVoices(force = false): Promise<string[]> {
 		const config = this.getConfig();
 		if (!isWindows()) {
-			return [config.ttsVoice];
+			return [config.sapiVoice];
 		}
 
 		const cacheAge = Date.now() - this.voicesCache.timestamp;
@@ -247,11 +260,11 @@ try {
 			.filter(Boolean);
 		const unique = Array.from(new Set(values));
 		if (unique.length === 0) {
-			unique.push(config.ttsVoice);
+			unique.push(config.sapiVoice);
 		}
 
-		if (!unique.includes(config.ttsVoice)) {
-			unique.push(config.ttsVoice);
+		if (!unique.includes(config.sapiVoice)) {
+			unique.push(config.sapiVoice);
 		}
 
 		this.voicesCache = { values: unique, timestamp: Date.now() };

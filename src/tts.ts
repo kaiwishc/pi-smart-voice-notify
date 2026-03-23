@@ -571,23 +571,31 @@ $path = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64Strin
 if (-not (Test-Path -LiteralPath $path)) {
   throw 'Audio file not found.'
 }
-Add-Type -AssemblyName PresentationCore
-$player = New-Object System.Windows.Media.MediaPlayer
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class PiSmartVoiceNotifyTTSWinMM {
+  [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+  public static extern int mciSendString(string command, StringBuilder buffer, int bufferSize, IntPtr hwndCallback);
+}
+'@ -Language CSharp
+$alias = 'pi_tts_' + [Guid]::NewGuid().ToString('N')
+$buffer = New-Object System.Text.StringBuilder 260
+function Invoke-Mci([string]$command) {
+  [void]$buffer.Clear()
+  $result = [PiSmartVoiceNotifyTTSWinMM]::mciSendString($command, $buffer, $buffer.Capacity, [IntPtr]::Zero)
+  if ($result -ne 0) {
+    throw "MCI command failed ($result): $command"
+  }
+  return $buffer.ToString()
+}
 try {
-  $player.Open([Uri]::new($path))
-  $deadline = (Get-Date).AddSeconds(6)
-  while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 40
-  }
-  $durationMs = if ($player.NaturalDuration.HasTimeSpan) {
-    [Math]::Max(250, [Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds))
-  } else {
-    2500
-  }
-  $player.Play()
-  Start-Sleep -Milliseconds $durationMs
+  [void](Invoke-Mci "open \`"$path\`" type mpegvideo alias $alias")
+  [void](Invoke-Mci "seek $alias to start")
+  [void](Invoke-Mci "play $alias wait")
 } finally {
-  $player.Close()
+  [void][PiSmartVoiceNotifyTTSWinMM]::mciSendString("close $alias", $null, 0, [IntPtr]::Zero)
 }
 `;
 			const result = await this.runPowerShell(script, this.config.commandTimeoutMs, signal);
