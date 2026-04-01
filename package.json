@@ -1,6 +1,6 @@
 {
   "name": "pi-smart-voice-notify",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Windows-optimized smart voice, sound, and desktop notifications for Pi coding agent.",
   "type": "module",
   "main": "./index.ts",
@@ -52,8 +52,8 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "^0.62.0",
-    "@mariozechner/pi-tui": "^0.62.0"
+    "@mariozechner/pi-coding-agent": "^0.64.0",
+    "@mariozechner/pi-tui": "^0.64.0"
   },
   "dependencies": {
     "node-notifier": "^10.0.1"
