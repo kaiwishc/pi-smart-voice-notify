@@ -1,5 +1,7 @@
 # 🔔 pi-smart-voice-notify
 
+[![npm version](https://img.shields.io/npm/v/pi-smart-voice-notify?style=flat-square)](https://www.npmjs.com/package/pi-smart-voice-notify) [![License](https://img.shields.io/github/license/MasuRii/pi-smart-voice-notify?style=flat-square)](LICENSE)
+
 Windows-optimized smart notification extension for the Pi coding agent.
 
 **pi-smart-voice-notify** monitors Pi session and tool events to alert you via **multi-engine TTS**, **sound playback**, **desktop toast notifications**, and optional **webhook/AI-assisted messaging** when the agent requires your attention.
@@ -52,7 +54,7 @@ Windows-optimized smart notification extension for the Pi coding agent.
 
 Place this folder in either location (Pi auto-discovers both):
 
-- **Global:** `~/.pi/agent/extensions/pi-smart-voice-notify`
+- **Global default:** `~/.pi/agent/extensions/pi-smart-voice-notify` (respects `PI_CODING_AGENT_DIR`)
 - **Project:** `.pi/extensions/pi-smart-voice-notify`
 
 ### As an npm Package
@@ -93,8 +95,9 @@ pi install git:github.com/MasuRii/pi-smart-voice-notify
 
 Configuration is stored at:
 
-```
-~/.pi/agent/extensions/pi-smart-voice-notify/config.json
+```text
+Default global path: ~/.pi/agent/extensions/pi-smart-voice-notify/config.json
+Actual global path: $PI_CODING_AGENT_DIR/extensions/pi-smart-voice-notify/config.json when PI_CODING_AGENT_DIR is set
 ```
 
 A starter template is provided in `config/config.example.json`. On startup, the extension creates `config.json` with defaults if missing.
@@ -125,7 +128,7 @@ A starter template is provided in `config/config.example.json`. On startup, the 
 | `enablePermissionNotification` | boolean | `true` | Notify on permission blocks |
 | `enableForwardedPermissionWatcher` | boolean | `true` | Watch forwarded permission request files and notify when new requests arrive |
 | `includeForwardedPermissionAgentName` | boolean | `true` | Include sanitized requester agent name in forwarded permission notification text |
-| `watchLegacyForwardedPermissionPath` | boolean | `true` | Also watch legacy `~/.pi/agent/permission-forwarding/requests` when present |
+| `watchLegacyForwardedPermissionPath` | boolean | `true` | Also watch the legacy forwarded-permission directory (default: `~/.pi/agent/permission-forwarding/requests`, respects `PI_CODING_AGENT_DIR`) when present |
 | `enableQuestionNotification` | boolean | `true` | Notify when agent asks a question* |
 | `enableErrorNotification` | boolean | `true` | Notify on errors |
 | `suppressIdleAfterError` | boolean | `true` | Skip idle notification if turn had errors |
@@ -253,8 +256,7 @@ src/
 
 | Event | Behavior |
 |-------|----------|
-| `session_start` | Load config, reset state, update status bar |
-| `session_switch` | Reset state, refresh question tool availability |
+| `session_start` | Load config, reset state, update status bar. Handles all session lifecycle transitions via `reason` (`startup`, `reload`, `new`, `resume`, `fork`). |
 | `session_shutdown` | Cancel reminders, clear status |
 | `input` | Track user activity, cancel pending reminders |
 | `agent_start` | Reset error tracking |
@@ -267,7 +269,7 @@ src/
 When `debugLog: true`, JSONL events are written to:
 
 ```
-~/.pi/agent/extensions/pi-smart-voice-notify/debug/pi-smart-voice-notify.log
+Default global debug log path: ~/.pi/agent/extensions/pi-smart-voice-notify/debug/pi-smart-voice-notify.log (respects PI_CODING_AGENT_DIR)
 ```
 
 Events include: config changes, notifications triggered, audio dispatch, reminders, and errors.

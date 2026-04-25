@@ -1,5 +1,5 @@
 {
-  "_comment_0": "pi-smart-voice-notify example config. Copy this file to ~/.pi/agent/extensions/pi-smart-voice-notify/config.json and edit values.",
+  "_comment_0": "pi-smart-voice-notify example config. Copy this file to the global Pi extension config path (default: ~/.pi/agent/extensions/pi-smart-voice-notify/config.json; respects PI_CODING_AGENT_DIR) and edit values.",
   "_comment_1": "Secrets should be provided via environment variables (ELEVENLABS_API_KEY, OPENAI_TTS_API_KEY, OPENAI_API_KEY, DISCORD_WEBHOOK_URL, WEBHOOK_URL).",
 
   "version": 1,
