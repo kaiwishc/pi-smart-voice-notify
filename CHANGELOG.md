@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.4] - 2026-04-25
+
+### Added
+- Added shutdown-aware notification lifecycle handling so pending reminders and queued playback stop cleanly during session shutdown
+- Added `session_start.reason` handling for startup, reload, new, resume, and fork session transitions
+
+### Changed
+- Updated global extension path documentation to account for `PI_CODING_AGENT_DIR`-aware configuration and debug paths
+- Synchronized package metadata and lockfile for the 0.3.4 patch release while preserving `@mariozechner/pi-*` peer dependency range `^0.70.2`
+- Release note context: `v0.3.2` is not on `main`; no tag or history repair is included in this release prep
+
+## [0.3.2] - 2026-04-01
+
+### Changed
+- Added Related Pi Extensions cross-linking section to README
+- Aligned npm keywords for improved discoverability
+- Updated README with new image and expanded features documentation
+
 ## [0.3.1] - 2026-04-01
 
 ### Changed
