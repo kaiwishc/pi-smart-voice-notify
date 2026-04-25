@@ -128,6 +128,30 @@ function delay(ms: number): Promise<void> {
 	});
 }
 
+/**
+ * Sleep with abort signal support.
+ */
+function delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new Error("Wait was aborted."));
+			return;
+		}
+
+		const handle = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+
+		const onAbort = () => {
+			clearTimeout(handle);
+			reject(new Error("Wait was aborted."));
+		};
+
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
 function parseBoolean(value: string | undefined): boolean | undefined {
 	if (!value) {
 		return undefined;
@@ -481,8 +505,8 @@ export class WebhookService {
 		return { queued, skipped: queued === 0 };
 	}
 
-	public async flush(): Promise<void> {
-		await this.processQueue();
+	public async flush(signal?: AbortSignal): Promise<void> {
+		await this.processQueue(signal);
 	}
 
 	public getQueueSize(): number {
@@ -520,13 +544,13 @@ export class WebhookService {
 		return `${target.provider}:${target.url}`;
 	}
 
-	private async waitForRateLimit(target: ResolvedWebhookTarget): Promise<void> {
+	private async waitForRateLimit(target: ResolvedWebhookTarget, signal?: AbortSignal): Promise<void> {
 		const key = this.targetKey(target);
 		const state = this.rateLimitState.get(key) ?? { lastSentAt: 0, nextAllowedAt: 0 };
 		const waitUntil = Math.max(state.nextAllowedAt, state.lastSentAt + this.config.minIntervalMs);
 		const now = Date.now();
 		if (waitUntil > now) {
-			await delay(waitUntil - now);
+			await delayWithAbort(waitUntil - now, signal);
 		}
 	}
 
@@ -548,29 +572,42 @@ export class WebhookService {
 		this.config.logger(message, details);
 	}
 
-	private async processQueue(): Promise<void> {
+	private async processQueue(signal?: AbortSignal): Promise<void> {
 		if (this.processingQueue) {
 			return;
 		}
 		this.processingQueue = true;
 		try {
 			while (this.queue.length > 0) {
+				if (signal?.aborted) {
+					// Clear queue on abort to avoid stale items
+					this.queue.length = 0;
+					return;
+				}
 				const item = this.queue.shift();
 				if (!item) {
 					continue;
 				}
-				await this.sendWithRetry(item);
+				await this.sendWithRetry(item, signal);
 			}
 		} finally {
 			this.processingQueue = false;
 		}
 	}
 
-	private async sendWithRetry(item: QueueItem): Promise<void> {
+	private async sendWithRetry(item: QueueItem, signal?: AbortSignal): Promise<void> {
 		for (let attempt = 0; attempt <= this.config.maxRetries; attempt += 1) {
-			await this.waitForRateLimit(item.target);
-			const result = await this.sendOnce(item.target, item.event);
+			if (signal?.aborted) {
+				return;
+			}
+			await this.waitForRateLimit(item.target, signal);
+			const result = await this.sendOnce(item.target, item.event, signal);
 			if (result.success) {
+				return;
+			}
+
+			// Don't retry on abort
+			if (signal?.aborted) {
 				return;
 			}
 
@@ -597,21 +634,31 @@ export class WebhookService {
 				delayMs: retryDelay,
 				statusCode: result.statusCode,
 			});
-			await delay(retryDelay);
+			await delayWithAbort(retryDelay, signal);
 		}
 	}
 
-	private async sendOnce(target: ResolvedWebhookTarget, event: WebhookEvent): Promise<SendAttemptResult> {
+	private async sendOnce(target: ResolvedWebhookTarget, event: WebhookEvent, externalSignal?: AbortSignal): Promise<SendAttemptResult> {
 		this.markRequest(target);
 		const payload =
 			target.provider === "discord"
 				? buildDiscordPayload(target, event, this.config)
 				: buildGenericPayload(event);
 
+		// Check if already aborted before starting
+		if (externalSignal?.aborted) {
+			return { success: false, error: "Request aborted" };
+		}
+
+		// Create a combined abort controller that respects both timeout and external signal
 		const controller = new AbortController();
 		const timeout = setTimeout(() => {
 			controller.abort();
 		}, this.config.requestTimeoutMs);
+
+		// Wire external signal to abort
+		const onExternalAbort = () => controller.abort();
+		externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
 
 		const headers: HeadersInit = {
 			"Content-Type": "application/json",
@@ -647,6 +694,10 @@ export class WebhookService {
 				error: `HTTP ${response.status}`,
 			};
 		} catch (error) {
+			// Check if this was an external abort
+			if (externalSignal?.aborted) {
+				return { success: false, error: "Request aborted" };
+			}
 			const message = getErrorMessage(error);
 			return {
 				success: false,
@@ -654,6 +705,7 @@ export class WebhookService {
 			};
 		} finally {
 			clearTimeout(timeout);
+			externalSignal?.removeEventListener("abort", onExternalAbort);
 		}
 	}
 }

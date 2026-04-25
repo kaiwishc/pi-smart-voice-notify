@@ -51,9 +51,38 @@ import type { TTSConfig, TTSService } from "./types/tts.ts";
 import { createWebhookService, type WebhookConfig } from "./webhook.ts";
 import { ZellijModal, ZellijSettingsModal } from "./zellij-modal.ts";
 
+type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
+
 function pickRandom<T>(items: readonly T[]): T {
 	const index = Math.floor(Math.random() * items.length);
 	return items[index] ?? items[0];
+}
+
+function getSessionStartReason(event: object): SessionStartReason | undefined {
+	if (!("reason" in event)) {
+		return undefined;
+	}
+
+	const { reason } = event;
+	if (
+		reason === "startup"
+		|| reason === "reload"
+		|| reason === "new"
+		|| reason === "resume"
+		|| reason === "fork"
+	) {
+		return reason;
+	}
+
+	return undefined;
+}
+
+function getPreviousSessionFile(event: object): string | undefined {
+	if (!("previousSessionFile" in event) || typeof event.previousSessionFile !== "string") {
+		return undefined;
+	}
+
+	return event.previousSessionFile;
 }
 
 function extractTextContent(content: unknown): string {
@@ -327,6 +356,8 @@ export default function smartVoiceNotifyExtension(
 	let audioQueue: Promise<void> = Promise.resolve();
 	let questionToolAvailable = false;
 	let activeSessionContext: ExtensionContext | null = null;
+	let shutdownRequested = false;
+	let shutdownPromise: Promise<void> | null = null;
 
 	const pendingReminders = new Map<ReminderKey, ReminderState>();
 	const reminderPlayback = new ReminderPlaybackController();
@@ -968,7 +999,13 @@ export default function smartVoiceNotifyExtension(
 		delaySeconds: number,
 		followUpCount: number,
 	): void => {
-		if (!config.enabled || !config.reminderEnabled || !config.enableTts || config.notificationMode === "sound-only") {
+		if (
+			shutdownRequested
+			|| !config.enabled
+			|| !config.reminderEnabled
+			|| !config.enableTts
+			|| config.notificationMode === "sound-only"
+		) {
 			return;
 		}
 
@@ -982,6 +1019,15 @@ export default function smartVoiceNotifyExtension(
 				(async () => {
 					const current = pendingReminders.get(reminderKey);
 					if (!current || current.scheduledAt !== scheduledAt) {
+						return;
+					}
+					if (shutdownRequested) {
+						pendingReminders.delete(reminderKey);
+						logger.debug("reminder.skipped_shutdown", {
+							reminderKey,
+							type,
+							followUpCount,
+						});
 						return;
 					}
 
@@ -1106,9 +1152,17 @@ export default function smartVoiceNotifyExtension(
 			scheduleReminder?: boolean;
 		} = {},
 	): void => {
+		if (shutdownRequested) {
+			logger.debug("notification.skipped_shutdown", {
+				type,
+				reason: options.reason,
+			});
+			return;
+		}
+
 		queueTask(
 			(async () => {
-				if (!config.enabled || !isNotificationEnabled(config, type)) {
+				if (shutdownRequested || !config.enabled || !isNotificationEnabled(config, type)) {
 					return;
 				}
 				if (!options.bypassThrottle && shouldThrottle(type)) {
@@ -1151,6 +1205,14 @@ export default function smartVoiceNotifyExtension(
 				});
 
 				enqueueAudio(async () => {
+					if (shutdownRequested) {
+						logger.debug("notification.playback_skipped", {
+							type,
+							reason: "session_shutdown",
+						});
+						return;
+					}
+
 					const mode = config.notificationMode;
 					const shouldPlaySoundNow =
 						config.enableSound && (mode === "sound-first" || mode === "both" || mode === "sound-only");
@@ -1164,6 +1226,10 @@ export default function smartVoiceNotifyExtension(
 						logger.debug("wake.monitor.error", { error: getErrorMessage(error) });
 					}
 
+					if (shutdownRequested) {
+						return;
+					}
+
 					let soundPlayed = false;
 					if (shouldPlaySoundNow) {
 						soundPlayed = await playNotificationSound(type);
@@ -1172,7 +1238,15 @@ export default function smartVoiceNotifyExtension(
 						}
 					}
 
+					if (shutdownRequested) {
+						return;
+					}
+
 					await dispatchDesktop(type, displayMessage, ctx);
+
+					if (shutdownRequested) {
+						return;
+					}
 
 					if (shouldSpeakNow) {
 						const spoken = await speakNotification(spokenMessage);
@@ -1181,9 +1255,11 @@ export default function smartVoiceNotifyExtension(
 						}
 					}
 
-					dispatchWebhook(type, spokenMessage);
+					if (!shutdownRequested) {
+						dispatchWebhook(type, spokenMessage);
+					}
 				});
-				if (options.scheduleReminder !== false) {
+				if (!shutdownRequested && options.scheduleReminder !== false) {
 					scheduleReminder(options.reminderKey ?? defaultReminderKey(type), type, getReminderDelaySeconds(type), 0);
 				}
 			})(),
@@ -1580,66 +1656,104 @@ export default function smartVoiceNotifyExtension(
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
-		activeSessionContext = ctx;
+	pi.on("resources_discover", (event, _ctx) => {
+		if (event.reason === "reload") {
+			// Clear caches on reload
+			clearFocusDetectCache();
+			clearProjectSoundCache();
+			aiMessageService.clearCache();
+		}
+	});
+
+	pi.on("session_start", async (event, ctx) => {
+		const reason = getSessionStartReason(event);
+		const previousSessionFile = getPreviousSessionFile(event);
+
+		shutdownRequested = false;
+		shutdownPromise = null;
 		config = readConfig();
 		refreshIntegratedServiceConfig();
+		activeSessionContext = ctx;
 		syncPermissionForwardingWatcher();
 		refreshQuestionToolAvailability();
 		clearFocusDetectCache();
 		clearProjectSoundCache();
+
+		// Clear AI message cache on reload to pick up config changes
+		if (reason === "reload") {
+			aiMessageService.clearCache();
+		}
 		lastUserActivityAt = Date.now();
 		hadErrorInTurn = false;
-		warnedNonWindows = false;
 		warnedDesktopUnsupported = false;
 		pendingPermissionToolCallIds.clear();
 		blockedPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
 		lastNotificationAt.clear();
+
+		if (reason === "new" || reason === "resume" || reason === "fork") {
+			resetPermissionBatch(`session_start:${reason}`);
+			cancelReminderActivity(`session_start:${reason}`);
+			updateStatus(ctx);
+			logger.debug("session.start", {
+				reason,
+				previousSessionFile,
+				configPath: CONFIG_PATH,
+				debugLogPath: DEBUG_LOG_PATH,
+				notificationMode: config.notificationMode,
+			});
+			return;
+		}
+
+		warnedNonWindows = false;
 		resetPermissionBatch("session_start");
 		cancelReminderActivity("session_start");
 		updateStatus(ctx);
 		logger.debug("session.start", {
+			reason: reason ?? "startup",
+			previousSessionFile,
 			configPath: CONFIG_PATH,
 			debugLogPath: DEBUG_LOG_PATH,
 			notificationMode: config.notificationMode,
 		});
 	});
 
-	pi.on("session_switch", async (_event, ctx) => {
-		activeSessionContext = ctx;
-		syncPermissionForwardingWatcher();
-		refreshQuestionToolAvailability();
-		clearFocusDetectCache();
-		clearProjectSoundCache();
-		lastUserActivityAt = Date.now();
-		hadErrorInTurn = false;
-		warnedDesktopUnsupported = false;
-		pendingPermissionToolCallIds.clear();
-		blockedPermissionToolCallIds.clear();
-		processedToolResultToolCallIds.clear();
-		lastNotificationAt.clear();
-		resetPermissionBatch("session_switch");
-		cancelReminderActivity("session_switch");
-		updateStatus(ctx);
-		logger.debug("session.switch", {});
-	});
-
 	pi.on("session_shutdown", async (_event, ctx) => {
-		logger.debug("session.shutdown", {});
-		activeSessionContext = null;
-		permissionForwardingWatcher.stop();
-		pendingPermissionToolCallIds.clear();
-		blockedPermissionToolCallIds.clear();
-		processedToolResultToolCallIds.clear();
-		resetPermissionBatch("session_shutdown");
-		cancelReminderActivity("session_shutdown");
-		clearFocusDetectCache();
-		clearProjectSoundCache();
-		await webhookService.flush();
-		if (ctx.hasUI) {
-			ctx.ui.setStatus(STATUS_KEY, undefined);
+		shutdownRequested = true;
+		if (shutdownPromise) {
+			await shutdownPromise;
+			return;
 		}
+
+		shutdownPromise = (async () => {
+			logger.debug("session.shutdown", {});
+			activeSessionContext = null;
+			permissionForwardingWatcher.stop();
+			pendingPermissionToolCallIds.clear();
+			blockedPermissionToolCallIds.clear();
+			processedToolResultToolCallIds.clear();
+			resetPermissionBatch("session_shutdown");
+			cancelReminderActivity("session_shutdown");
+			clearFocusDetectCache();
+			clearProjectSoundCache();
+			try {
+				// Forward abort signal to flush if available (added in pi-coding-agent 0.67.x)
+				const abortSignal = 'signal' in ctx ? (ctx as { signal?: AbortSignal }).signal : undefined;
+				await webhookService.flush(abortSignal);
+			} catch (error) {
+				const message = `Failed to flush webhook queue during shutdown: ${getErrorMessage(error)}`;
+				logger.error(new Error(message));
+				if (ctx.hasUI) {
+					ctx.ui.notify(message, "warning");
+				}
+			} finally {
+				if (ctx.hasUI) {
+					ctx.ui.setStatus(STATUS_KEY, undefined);
+				}
+			}
+		})();
+
+		await shutdownPromise;
 	});
 
 	pi.on("input", async (event) => {

@@ -1,5 +1,5 @@
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { getErrorMessage } from "./logging.ts";
@@ -8,8 +8,9 @@ import { toRecord } from "./config-store.ts";
 export type PermissionForwardingSource = "primary" | "legacy";
 export type ForwardedPermissionResolutionReason = "request_removed" | "watch_disabled" | "watcher_stopped";
 
-const PRIMARY_REQUESTS_DIR = join(homedir(), ".pi", "agent", "sessions", "permission-forwarding", "requests");
-const LEGACY_REQUESTS_DIR = join(homedir(), ".pi", "agent", "permission-forwarding", "requests");
+const AGENT_DIR = getAgentDir();
+const PRIMARY_REQUESTS_DIR = join(AGENT_DIR, "sessions", "permission-forwarding", "requests");
+const LEGACY_REQUESTS_DIR = join(AGENT_DIR, "permission-forwarding", "requests");
 const SCAN_INTERVAL_MS = 1_500;
 
 interface WatchDirectoryEntry {
