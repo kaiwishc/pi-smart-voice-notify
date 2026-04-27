@@ -19,7 +19,7 @@ Windows-optimized smart notification extension for the Pi coding agent.
 
 - **Intelligent event detection**
   - Task completion (idle)
-  - Direct permission blocks plus forwarded subagent permission requests
+  - Authoritative permission-system wait events plus current-session forwarded subagent permission requests
   - Questions requiring input (when custom `question` tool is loaded)
   - Errors
 
@@ -125,17 +125,17 @@ A starter template is provided in `config/config.example.json`. On startup, the 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enableIdleNotification` | boolean | `true` | Notify when agent finishes a task |
-| `enablePermissionNotification` | boolean | `true` | Notify on permission blocks |
-| `enableForwardedPermissionWatcher` | boolean | `true` | Watch forwarded permission request files and notify when new requests arrive |
+| `enablePermissionNotification` | boolean | `true` | Notify when the permission system reports requests waiting for approval |
+| `enableForwardedPermissionWatcher` | boolean | `true` | Watch current-session forwarded permission request/response files and notify when new requests arrive |
 | `includeForwardedPermissionAgentName` | boolean | `true` | Include sanitized requester agent name in forwarded permission notification text |
-| `watchLegacyForwardedPermissionPath` | boolean | `true` | Also watch the legacy forwarded-permission directory (default: `~/.pi/agent/permission-forwarding/requests`, respects `PI_CODING_AGENT_DIR`) when present |
+| `watchLegacyForwardedPermissionPath` | boolean | `true` | Retained for config compatibility; unscoped legacy forwarded-permission paths are ignored because they cannot prove the current target session |
 | `enableQuestionNotification` | boolean | `true` | Notify when agent asks a question* |
 | `enableErrorNotification` | boolean | `true` | Notify on errors |
 | `suppressIdleAfterError` | boolean | `true` | Skip idle notification if turn had errors |
 
 *Question notifications only work when a custom `question` tool is loaded.
 
-Forwarded permission watcher notifications use privacy-safe text and never include raw forwarded `message` content.
+Forwarded permission watcher notifications use privacy-safe text, require the request `targetSessionId` to match the active Pi session, and never include raw forwarded `message` content.
 
 ### Reminder Settings
 

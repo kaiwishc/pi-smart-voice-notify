@@ -45,7 +45,7 @@ const DEFAULT_WEBHOOK_EVENTS: NotificationType[] = [...NOTIFICATION_TYPE_VALUES]
 
 export const INLINE_NOTIFY_TEXT: Record<NotificationType, string> = {
 	idle: "✅ Agent finished its current task.",
-	permission: "⚠️ Action blocked by permission policy.",
+	permission: "⚠️ Permission approval is pending.",
 	question: "❓ Agent needs your input.",
 	error: "❌ Agent encountered an error.",
 };
@@ -107,15 +107,6 @@ export const MESSAGE_LIBRARY: Record<NotificationType, MessageSet> = {
 		],
 	},
 };
-
-export const PERMISSION_HINTS = [
-	"permission",
-	"not permitted",
-	"requires approval",
-	"approval",
-	"user denied",
-	"blocked by",
-];
 
 export const QUESTION_HINTS = ["question", "need your input", "please answer", "requires your input"];
 

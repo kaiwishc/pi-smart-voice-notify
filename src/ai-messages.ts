@@ -70,7 +70,7 @@ const DEFAULT_TEMPLATES: Record<CoreAIEventType, string[]> = {
 	permission: [
 		"Permission needed for {projectName}. Please approve in the terminal.",
 		"I need your approval to continue {projectName}.",
-		"Action blocked. Please confirm the pending permission request.",
+		"Permission approval is pending. Please confirm the request.",
 	],
 	question: [
 		"I need your input for {projectName}. Please check the terminal.",

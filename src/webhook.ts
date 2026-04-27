@@ -110,8 +110,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 8_000;
 
 const DISCORD_HOSTS = new Set(["discord.com", "discordapp.com", "ptb.discord.com", "canary.discord.com"]);
 
-function defaultLogger(message: string, details: Record<string, unknown> = {}): void {
-	console.warn("[pi-smart-voice-notify:webhook]", message, details);
+function defaultLogger(_message: string, _details: Record<string, unknown> = {}): void {
+	// Extension logging is file-based and injected by the extension entry point when enabled.
 }
 
 const DISCORD_COLORS: Record<NotificationType | "default", number> = {

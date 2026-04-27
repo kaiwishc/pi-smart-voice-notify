@@ -59,14 +59,13 @@ export function createExtensionLogger(options: LoggerOptions): ExtensionLogger {
 				...details,
 			});
 			appendFileSync(debugLogPath, `${line}\n`, "utf-8");
-		} catch (error) {
-			console.error(`[${extensionId}] Failed to write debug log: ${getErrorMessage(error)}`);
+		} catch {
+			// Debug logging must never write to stdout/stderr from extension code.
 		}
 	};
 
 	const error = (cause: unknown): void => {
 		debug("runtime.error", { error: cause });
-		console.error(`[${extensionId}] ${getErrorMessage(cause)}`);
 	};
 
 	return { debug, error };

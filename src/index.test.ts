@@ -61,6 +61,7 @@ class FakeEventBus {
 
 class FakePi {
 	private readonly handlers = new Map<string, EventHandler[]>();
+	private tools: Array<{ name: string }> = [];
 
 	public readonly events = new FakeEventBus();
 
@@ -73,8 +74,12 @@ class FakePi {
 	public registerCommand(): void {
 	}
 
+	public setAvailableTools(tools: Array<{ name: string }>): void {
+		this.tools = [...tools];
+	}
+
 	public getAllTools(): Array<{ name: string }> {
-		return [];
+		return [...this.tools];
 	}
 
 	public sendMessage(): void {
@@ -397,7 +402,13 @@ test("skipWhenFocused=false still notifies even when the terminal is focused", a
 
 	await pi.emit("session_start", {}, ctx);
 	await flushAsyncWork();
-	await pi.emit("tool_call", permissionEvent("call-focus-disabled"), ctx);
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-focus-disabled", {
+			toolCallId: "call-focus-disabled",
+			toolName: "write_file",
+		}),
+	);
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
@@ -425,7 +436,13 @@ test("skipWhenFocused=true suppresses focused notifications and uses config focu
 
 	await pi.emit("session_start", {}, ctx);
 	await flushAsyncWork();
-	await pi.emit("tool_call", permissionEvent("call-focus-enabled"), ctx);
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-focus-enabled", {
+			toolCallId: "call-focus-enabled",
+			toolName: "write_file",
+		}),
+	);
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
@@ -525,7 +542,13 @@ test("permission reminders use the permission-specific reminder interval", async
 
 	await pi.emit("session_start", {}, ctx);
 	await flushAsyncWork();
-	await pi.emit("tool_call", permissionEvent("call-permission-reminder-delay"), ctx);
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-reminder-delay", {
+			toolCallId: "call-permission-reminder-delay",
+			toolName: "write_file",
+		}),
+	);
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
@@ -537,6 +560,47 @@ test("permission reminders use the permission-specific reminder interval", async
 
 	await tickAndFlush(1);
 	assert.equal(countReminderCalls(ttsCalls), 1);
+});
+
+test("blocked tool_call events do not trigger permission notifications without permission-system waiting state", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness();
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit("tool_call", permissionEvent("call-no-authoritative-wait"), ctx);
+	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
+	assert.equal(countReminderCalls(ttsCalls), 0);
+});
+
+test("permission-looking tool_result errors do not trigger permission notifications without permission-system waiting state", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness();
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit(
+		"tool_result",
+		{
+			toolCallId: "result-no-authoritative-wait",
+			toolName: "permission_guard",
+			isError: true,
+			content: [{ type: "text", text: "Requires approval from the user before continuing." }],
+		},
+		ctx,
+	);
+	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
+	assert.equal(countReminderCalls(ttsCalls), 0);
 });
 
 test("permission-system waiting events trigger a permission notification and cancel on resolution", async (t) => {
@@ -605,9 +669,21 @@ test("tool_execution_start only cancels the resolved permission reminder flow", 
 
 	await pi.emit("session_start", {}, ctx);
 	await flushAsyncWork();
-	await pi.emit("tool_call", permissionEvent("call-a"), ctx);
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-call-a", {
+			toolCallId: "call-a",
+			toolName: "write_file",
+		}),
+	);
 	await flushAsyncWork();
-	await pi.emit("tool_call", permissionEvent("call-b"), ctx);
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-call-b", {
+			toolCallId: "call-b",
+			toolName: "write_file",
+		}),
+	);
 	await flushAsyncWork();
 
 	assert.equal(countReminderCalls(ttsCalls), 0);
@@ -640,9 +716,21 @@ test("tool_result resolution keeps another permission reminder active while drop
 
 	await pi.emit("session_start", {}, ctx);
 	await flushAsyncWork();
-	await pi.emit("tool_call", permissionEvent("call-a"), ctx);
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-result-call-a", {
+			toolCallId: "call-a",
+			toolName: "write_file",
+		}),
+	);
 	await flushAsyncWork();
-	await pi.emit("tool_call", permissionEvent("call-b"), ctx);
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-result-call-b", {
+			toolCallId: "call-b",
+			toolName: "write_file",
+		}),
+	);
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	await tickAndFlush(1_000);
@@ -662,7 +750,7 @@ test("tool_result resolution keeps another permission reminder active while drop
 	assert.equal(countReminderCalls(ttsCalls), 1);
 });
 
-test("tool_result with the same toolCallId still classifies after a permission-blocked tool_call", async (t) => {
+test("tool_result with the same toolCallId still classifies after a permission-system waiting event", async (t) => {
 	disableFocusDetection(t);
 	useMockClock(t);
 
@@ -672,7 +760,13 @@ test("tool_result with the same toolCallId still classifies after a permission-b
 
 	await pi.emit("session_start", {}, ctx);
 	await flushAsyncWork();
-	await pi.emit("tool_call", permissionEvent("call-shared"), ctx);
+	pi.events.emit(
+		PERMISSION_SYSTEM_EVENT_CHANNEL,
+		permissionSystemEvent("waiting", "permission-shared", {
+			toolCallId: "call-shared",
+			toolName: "write_file",
+		}),
+	);
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
@@ -690,6 +784,79 @@ test("tool_result with the same toolCallId still classifies after a permission-b
 	await flushAsyncWork();
 
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 2);
+});
+
+test("agent_end triggers an idle notification when idle notifications are enabled", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness({
+		enableIdleNotification: true,
+		reminderEnabled: false,
+	});
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit("agent_end", {}, ctx);
+	await flushAsyncWork();
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assert.equal(countReminderCalls(ttsCalls), 0);
+});
+
+test("question-classified tool_result triggers a question notification when the question tool is available", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness({
+		enableQuestionNotification: true,
+		reminderEnabled: false,
+	});
+	pi.setAvailableTools([{ name: "question" }]);
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit(
+		"tool_result",
+		{
+			toolCallId: "call-question-available",
+			toolName: "custom_tool",
+			isError: false,
+			content: [{ type: "text", text: "This request requires your input before continuing." }],
+		},
+		ctx,
+	);
+	await flushAsyncWork();
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assert.equal(countReminderCalls(ttsCalls), 0);
+});
+
+test("question-classified tool_result does not notify when the question tool is unavailable", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness({
+		enableQuestionNotification: true,
+		reminderEnabled: false,
+	});
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit(
+		"tool_result",
+		{
+			toolCallId: "call-question-unavailable",
+			toolName: "custom_tool",
+			isError: false,
+			content: [{ type: "text", text: "This request requires your input before continuing." }],
+		},
+		ctx,
+	);
+	await flushAsyncWork();
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
+	assert.equal(countReminderCalls(ttsCalls), 0);
 });
 
 test("forwarded permission resolution cancels a queued reminder before it fires", async (t) => {

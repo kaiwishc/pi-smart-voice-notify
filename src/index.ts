@@ -19,7 +19,6 @@ import {
 	isWindows,
 	MESSAGE_LIBRARY,
 	normalizeConfig,
-	PERMISSION_HINTS,
 	QUESTION_HINTS,
 	readConfigFromDisk,
 	SOUND_LOOPS,
@@ -125,43 +124,7 @@ function classifyToolResult(
 		return "question";
 	}
 
-	if (normalizedTool.includes("permission") || PERMISSION_HINTS.some((hint) => normalizedText.includes(hint))) {
-		return "permission";
-	}
-
 	return "error";
-}
-
-function readBlockedReason(value: unknown): string | null {
-	const record = toRecord(value);
-	const blockValue = record.block;
-	const isBlocked = blockValue === true || blockValue === "true";
-	if (!isBlocked) {
-		return null;
-	}
-
-	const reason = record.reason;
-	if (typeof reason !== "string") {
-		return null;
-	}
-
-	const normalizedReason = reason.trim();
-	return normalizedReason.length > 0 ? normalizedReason : null;
-}
-
-function extractToolCallBlockReason(event: unknown): string | null {
-	const directReason = readBlockedReason(event);
-	if (directReason) {
-		return directReason;
-	}
-
-	const record = toRecord(event);
-	return readBlockedReason(record.result);
-}
-
-function isPermissionReason(reason: string): boolean {
-	const normalizedReason = reason.toLowerCase();
-	return PERMISSION_HINTS.some((hint) => normalizedReason.includes(hint));
 }
 
 function statusLine(config: VoiceNotifyConfig): string | undefined {
@@ -213,6 +176,28 @@ function envInteger(defaultValue: number, ...keys: string[]): number {
 	}
 	const parsed = Number.parseInt(raw, 10);
 	return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
+function normalizePermissionForwardingSessionId(value: unknown): string | null {
+	if (typeof value !== "string") {
+		return null;
+	}
+	const trimmed = value.trim();
+	if (!trimmed || trimmed.toLowerCase() === "unknown") {
+		return null;
+	}
+	return trimmed;
+}
+
+function getPermissionForwardingSessionId(ctx: ExtensionContext): string | null {
+	try {
+		const sessionManager = "sessionManager" in ctx
+			? ctx.sessionManager as { getSessionId?: () => unknown }
+			: null;
+		return normalizePermissionForwardingSessionId(sessionManager?.getSessionId?.());
+	} catch {
+		return null;
+	}
 }
 
 function sanitizeAgentName(value: string | null): string | null {
@@ -362,7 +347,6 @@ export default function smartVoiceNotifyExtension(
 	const pendingReminders = new Map<ReminderKey, ReminderState>();
 	const reminderPlayback = new ReminderPlaybackController();
 	const pendingPermissionToolCallIds = new Set<string>();
-	const blockedPermissionToolCallIds = new Set<string>();
 	const processedToolResultToolCallIds = new Set<string>();
 	const lastNotificationAt = new Map<NotificationType, number>();
 
@@ -590,6 +574,7 @@ export default function smartVoiceNotifyExtension(
 		permissionForwardingWatcher.start({
 			enabled: config.enabled && config.enablePermissionNotification && config.enableForwardedPermissionWatcher,
 			watchLegacyPath: config.watchLegacyForwardedPermissionPath,
+			targetSessionId: getPermissionForwardingSessionId(activeSessionContext),
 		});
 	};
 
@@ -1415,7 +1400,6 @@ export default function smartVoiceNotifyExtension(
 		if (event.state === "waiting") {
 			if (event.toolCallId) {
 				pendingPermissionToolCallIds.add(event.toolCallId);
-				rememberScopedToolCallId(event.toolCallId, blockedPermissionToolCallIds);
 			}
 			logger.debug("permission_system.wait_detected", {
 				requestId: event.requestId,
@@ -1687,7 +1671,6 @@ export default function smartVoiceNotifyExtension(
 		hadErrorInTurn = false;
 		warnedDesktopUnsupported = false;
 		pendingPermissionToolCallIds.clear();
-		blockedPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
 		lastNotificationAt.clear();
 
@@ -1730,7 +1713,6 @@ export default function smartVoiceNotifyExtension(
 			activeSessionContext = null;
 			permissionForwardingWatcher.stop();
 			pendingPermissionToolCallIds.clear();
-			blockedPermissionToolCallIds.clear();
 			processedToolResultToolCallIds.clear();
 			resetPermissionBatch("session_shutdown");
 			cancelReminderActivity("session_shutdown");
@@ -1766,37 +1748,13 @@ export default function smartVoiceNotifyExtension(
 	pi.on("agent_start", async () => {
 		hadErrorInTurn = false;
 		pendingPermissionToolCallIds.clear();
-		blockedPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
 		resetPermissionBatch("agent_start");
 		logger.debug("agent.start", {});
 	});
 
-	pi.on("tool_call", async (event, ctx) => {
+	pi.on("tool_call", async (_event, ctx) => {
 		activeSessionContext = ctx;
-		if (!config.enabled || !config.enablePermissionNotification) {
-			return {};
-		}
-
-		const reason = extractToolCallBlockReason(event);
-		if (!reason || !isPermissionReason(reason)) {
-			return {};
-		}
-
-		if (!rememberScopedToolCallId(event.toolCallId, blockedPermissionToolCallIds)) {
-			return {};
-		}
-
-		pendingPermissionToolCallIds.add(event.toolCallId);
-		logger.debug("tool_call.permission_blocked", {
-			toolCallId: event.toolCallId,
-			toolName: event.toolName,
-			reason,
-		});
-		queuePermissionNotification(ctx, {
-			reminderKey: permissionReminderKey(event.toolCallId),
-			reason,
-		});
 		return {};
 	});
 

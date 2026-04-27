@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.5] - 2026-04-27
+
+### Fixed
+- Permission notifications now require an authoritative `pi-permission-system:permission-request` waiting event before alerts or reminders are queued, preventing permission-looking `tool_call` and `tool_result` payloads from producing false permission alerts.
+- Forwarded permission notifications now watch only the active session's scoped request/response directories, require matching `targetSessionId`, and ignore unscoped legacy paths, stale requests, resolved requests, malformed files, and mismatched request filenames.
+
 ## [0.3.4] - 2026-04-25
 
 ### Added

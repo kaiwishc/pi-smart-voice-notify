@@ -1,6 +1,6 @@
 {
   "name": "pi-smart-voice-notify",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Windows-optimized smart voice, sound, and desktop notifications for Pi coding agent.",
   "type": "module",
   "main": "./index.ts",
@@ -19,7 +19,7 @@
   "scripts": {
     "build": "npx --yes -p typescript@5.7.3 -p @types/node@20.17.57 tsc -p tsconfig.json --noEmit",
     "lint": "npm run build",
-    "test": "node --experimental-strip-types --test src/abortable-command.test.ts src/reminder-playback.test.ts src/index.test.ts",
+    "test": "node --experimental-strip-types --test src/abortable-command.test.ts src/reminder-playback.test.ts src/permission-forwarding-watcher.test.ts src/index.test.ts",
     "check": "npm run build && npm run test"
   },
   "keywords": [
