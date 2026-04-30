@@ -166,10 +166,10 @@ Forwarded permission watcher notifications use privacy-safe text, require the re
 
 | Option | Type | Default |
 |--------|------|---------|
-| `idleSoundFile` | string | `"assets/Soft-high-tech-notification-sound-effect.mp3"` |
-| `permissionSoundFile` | string | `"assets/Machine-alert-beep-sound-effect.mp3"` |
-| `questionSoundFile` | string | `"assets/Machine-alert-beep-sound-effect.mp3"` |
-| `errorSoundFile` | string | `"assets/Machine-alert-beep-sound-effect.mp3"` |
+| `idleSoundFile` | string | `"assets/soft-notification.mp3"` |
+| `permissionSoundFile` | string | `"assets/attention-alert.mp3"` |
+| `questionSoundFile` | string | `"assets/attention-alert.mp3"` |
+| `errorSoundFile` | string | `"assets/attention-alert.mp3"` |
 
 Paths can be absolute or relative to the extension directory.
 

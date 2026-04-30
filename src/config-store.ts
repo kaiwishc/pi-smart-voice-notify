@@ -174,10 +174,10 @@ export const DEFAULT_CONFIG: VoiceNotifyConfig = {
 	openaiTtsFormat: "mp3",
 	openaiTtsSpeed: 1,
 
-	idleSoundFile: "assets/Soft-high-tech-notification-sound-effect.mp3",
-	permissionSoundFile: "assets/Machine-alert-beep-sound-effect.mp3",
-	questionSoundFile: "assets/Machine-alert-beep-sound-effect.mp3",
-	errorSoundFile: "assets/Machine-alert-beep-sound-effect.mp3",
+	idleSoundFile: "assets/soft-notification.mp3",
+	permissionSoundFile: "assets/attention-alert.mp3",
+	questionSoundFile: "assets/attention-alert.mp3",
+	errorSoundFile: "assets/attention-alert.mp3",
 	themePath: "",
 	themeName: "default",
 	themesRootPath: "",
@@ -342,6 +342,34 @@ function stringOrDefault(value: unknown, fallback: string): string {
 		return normalized.length > 0 ? normalized : fallback;
 	}
 	return fallback;
+}
+
+const LEGACY_BUNDLED_SOUND_FILES: Record<string, string> = {
+	"assets/machine-alert-beep-sound-effect.mp3": "assets/attention-alert.mp3",
+	"assets/soft-high-tech-notification-sound-effect.mp3": "assets/soft-notification.mp3",
+};
+
+function normalizeSoundFileLookup(value: string): string {
+	return value.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
+}
+
+function soundFileExists(value: string): boolean {
+	return existsSync(isAbsolute(value) ? value : join(CONFIG_DIR, value));
+}
+
+function normalizeSoundFile(value: unknown, fallback: string): string {
+	const selected = stringOrDefault(value, fallback);
+	const lookup = normalizeSoundFileLookup(selected);
+	const migrated = LEGACY_BUNDLED_SOUND_FILES[lookup];
+	if (migrated) {
+		return migrated;
+	}
+
+	if (lookup.startsWith("assets/") && !soundFileExists(selected) && soundFileExists(fallback)) {
+		return fallback;
+	}
+
+	return selected;
 }
 
 function stringOrEmpty(value: unknown): string {
@@ -746,13 +774,13 @@ export function normalizeConfig(raw: unknown): VoiceNotifyConfig {
 		openaiTtsFormat: stringOrDefault(record.openaiTtsFormat, DEFAULT_CONFIG.openaiTtsFormat),
 		openaiTtsSpeed: clampNumber(record.openaiTtsSpeed, DEFAULT_CONFIG.openaiTtsSpeed, 0.25, 4),
 
-		idleSoundFile: stringOrDefault(record.idleSoundFile ?? record.idleSound, DEFAULT_CONFIG.idleSoundFile),
-		permissionSoundFile: stringOrDefault(
+		idleSoundFile: normalizeSoundFile(record.idleSoundFile ?? record.idleSound, DEFAULT_CONFIG.idleSoundFile),
+		permissionSoundFile: normalizeSoundFile(
 			record.permissionSoundFile ?? record.permissionSound,
 			DEFAULT_CONFIG.permissionSoundFile,
 		),
-		questionSoundFile: stringOrDefault(record.questionSoundFile ?? record.questionSound, DEFAULT_CONFIG.questionSoundFile),
-		errorSoundFile: stringOrDefault(record.errorSoundFile ?? record.errorSound, DEFAULT_CONFIG.errorSoundFile),
+		questionSoundFile: normalizeSoundFile(record.questionSoundFile ?? record.questionSound, DEFAULT_CONFIG.questionSoundFile),
+		errorSoundFile: normalizeSoundFile(record.errorSoundFile ?? record.errorSound, DEFAULT_CONFIG.errorSoundFile),
 		themePath: stringOrEmpty(record.themePath ?? record.soundThemeDir ?? record.themeDirectory),
 		themeName: stringOrDefault(record.themeName, DEFAULT_CONFIG.themeName),
 		themesRootPath: stringOrEmpty(record.themesRootPath ?? record.themesRootDirectory),
@@ -989,7 +1017,7 @@ export function isWindows(): boolean {
 
 export function resolveSoundFile(config: VoiceNotifyConfig, type: NotificationType): string | null {
 	const field = SOUND_FILE_FIELD[type];
-	const value = config[field];
+	const value = normalizeSoundFile(config[field], DEFAULT_CONFIG[field]);
 	if (!value.trim()) {
 		return null;
 	}

@@ -94,10 +94,10 @@
   "openaiTtsSpeed": 1,
 
   "_comment_sounds": "Direct sound file fallbacks.",
-  "idleSoundFile": "assets/Soft-high-tech-notification-sound-effect.mp3",
-  "permissionSoundFile": "assets/Machine-alert-beep-sound-effect.mp3",
-  "questionSoundFile": "assets/Machine-alert-beep-sound-effect.mp3",
-  "errorSoundFile": "assets/Machine-alert-beep-sound-effect.mp3",
+  "idleSoundFile": "assets/soft-notification.mp3",
+  "permissionSoundFile": "assets/attention-alert.mp3",
+  "questionSoundFile": "assets/attention-alert.mp3",
+  "errorSoundFile": "assets/attention-alert.mp3",
 
   "_comment_sound_theme": "Sound theme settings.",
   "themePath": "",
