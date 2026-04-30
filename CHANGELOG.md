@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0] - 2026-04-30
+
+### Added
+- Detect agent turn failures reported at `agent_end` and send error notifications instead of completion alerts.
+
+### Changed
+- Renamed bundled notification sound assets to stable lowercase filenames and migrate legacy bundled sound paths automatically.
+- Updated `@mariozechner/pi-*` peer dependency ranges to `^0.70.6` and synchronized package lock metadata.
+
 ## [0.3.5] - 2026-04-27
 
 ### Fixed
