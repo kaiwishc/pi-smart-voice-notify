@@ -127,6 +127,52 @@ function classifyToolResult(
 	return "error";
 }
 
+type AgentEndStatus = "completed" | "error" | "aborted";
+
+interface AgentEndOutcome {
+	status: AgentEndStatus;
+	reason?: string;
+}
+
+function readAgentEndOutcome(event: unknown): AgentEndOutcome {
+	const messages = toRecord(event).messages;
+	if (!Array.isArray(messages)) {
+		return { status: "completed" };
+	}
+
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = toRecord(messages[index]);
+		if (message.role !== "assistant") {
+			continue;
+		}
+
+		const stopReason = normalizeOptionalString(message.stopReason);
+		const errorMessage = normalizeOptionalString(message.errorMessage);
+		if (stopReason === "error") {
+			return { status: "error", reason: errorMessage ?? extractTextContent(message.content) };
+		}
+		if (stopReason === "aborted") {
+			return { status: "aborted", reason: errorMessage };
+		}
+		if (errorMessage) {
+			return { status: "error", reason: errorMessage };
+		}
+
+		return { status: "completed" };
+	}
+
+	return { status: "completed" };
+}
+
+function formatAgentErrorNotification(reason: string | undefined): string {
+	const normalizedReason = reason?.replace(/\s+/g, " ").trim();
+	if (!normalizedReason) {
+		return "❌ Agent ended with an error. Check the latest output before continuing.";
+	}
+
+	return `❌ Agent ended with an error: ${normalizedReason.slice(0, 160)}`;
+}
+
 function statusLine(config: VoiceNotifyConfig): string | undefined {
 	if (!config.enabled) {
 		return "voice:off";
@@ -1750,6 +1796,7 @@ export default function smartVoiceNotifyExtension(
 		pendingPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
 		resetPermissionBatch("agent_start");
+		cancelReminderActivity("agent_start");
 		logger.debug("agent.start", {});
 	});
 
@@ -1803,8 +1850,30 @@ export default function smartVoiceNotifyExtension(
 		});
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		activeSessionContext = ctx;
+		const outcome = readAgentEndOutcome(event);
+		if (outcome.status === "error") {
+			hadErrorInTurn = true;
+			logger.debug("agent.end.error_detected", {
+				reason: outcome.reason,
+			});
+			if (config.enabled && config.enableErrorNotification) {
+				triggerNotification("error", ctx, {
+					customMessage: formatAgentErrorNotification(outcome.reason),
+					reason: outcome.reason,
+				});
+			}
+			return;
+		}
+		if (outcome.status === "aborted") {
+			hadErrorInTurn = true;
+			logger.debug("agent.end.idle_skipped", {
+				reason: "agent_aborted",
+				errorMessage: outcome.reason,
+			});
+			return;
+		}
 		if (!config.enabled || !config.enableIdleNotification) {
 			logger.debug("agent.end.idle_skipped", {
 				reason: "idle_notification_disabled",
