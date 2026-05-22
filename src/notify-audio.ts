@@ -1,4 +1,5 @@
 import { runAbortableCommand } from "./abortable-command.ts";
+import { getIdleTime, wakeMonitor as wakeLinuxMonitor } from "./linux.ts";
 import {
 	clampInt,
 	DEFAULT_CONFIG,
@@ -82,11 +83,11 @@ export class AudioNotificationService {
 			}
 
 			if (process.platform === "linux") {
-				const script =
-					"xset dpms force on || gdbus call --session --dest org.gnome.SettingsDaemon.Power --object-path /org/gnome/SettingsDaemon/Power --method org.gnome.SettingsDaemon.Power.Screen.StepUp";
-				const result = await this.runShell(script, 6_000, "wake-monitor-linux");
-				if (!result.ok) {
-					throw new Error(result.stderr || result.stdout || "Failed to wake monitor on Linux");
+				const woke = await wakeLinuxMonitor({
+					debugLog: (message) => this.debug("linux.wake", { message }),
+				});
+				if (!woke) {
+					throw new Error("Failed to wake monitor on Linux");
 				}
 				this.debug("wake.monitor.success", { platform: process.platform });
 				return;
@@ -425,15 +426,15 @@ $idleMs = [IdleTimeProbe]::GetTickCount64() - [uint64]$info.dwTime
 		}
 
 		if (process.platform === "linux") {
-			const script = "if command -v xprintidle >/dev/null 2>&1; then xprintidle | awk '{ printf(\"%d\\n\", $1/1000) }'; else echo ''; fi";
-			const result = await this.runShell(script, 8_000, "idle-seconds-linux");
-			const parsed = result.ok ? this.parseIdleSeconds(result.stdout) : null;
-			if (parsed !== null) {
-				return parsed;
+			const idleSeconds = await getIdleTime({
+				debugLog: (message) => this.debug("linux.idle", { message }),
+			});
+			if (idleSeconds >= 0) {
+				return idleSeconds;
 			}
 			this.debug("wake.monitor.idle_fallback", {
 				platform: process.platform,
-				reason: result.ok ? "unparseable" : "exec_failed",
+				reason: "probe_failed",
 				fallbackSeconds,
 			});
 			return fallbackSeconds;

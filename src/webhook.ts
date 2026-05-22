@@ -1,3 +1,7 @@
+import { lookup as lookupDns } from "node:dns/promises";
+import { isIP } from "node:net";
+import { Agent, type Dispatcher } from "undici";
+
 import type { NotificationType } from "./types.ts";
 import { getErrorMessage } from "./logging.ts";
 
@@ -35,6 +39,9 @@ export interface WebhookTargetConfig {
 	avatarUrl?: string;
 }
 
+export type WebhookDnsLookup = (hostname: string) => Promise<Array<{ address: string; family: 4 | 6 }>>;
+export type WebhookFetch = typeof fetch;
+
 export interface WebhookConfig {
 	enabled?: boolean;
 	discordWebhookUrl?: string;
@@ -52,6 +59,8 @@ export interface WebhookConfig {
 	discordAvatarUrl?: string;
 	genericHeaders?: Record<string, string>;
 	logger?: (message: string, details?: Record<string, unknown>) => void;
+	dnsLookup?: WebhookDnsLookup;
+	fetch?: WebhookFetch;
 }
 
 export interface WebhookDispatchResult {
@@ -83,6 +92,8 @@ interface ResolvedWebhookConfig {
 	discordUsername?: string;
 	discordAvatarUrl?: string;
 	logger: (message: string, details?: Record<string, unknown>) => void;
+	dnsLookup: WebhookDnsLookup;
+	fetch: WebhookFetch;
 }
 
 interface QueueItem {
@@ -109,6 +120,13 @@ const DEFAULT_BASE_RETRY_DELAY_MS = 700;
 const DEFAULT_REQUEST_TIMEOUT_MS = 8_000;
 
 const DISCORD_HOSTS = new Set(["discord.com", "discordapp.com", "ptb.discord.com", "canary.discord.com"]);
+
+async function defaultDnsLookup(hostname: string): Promise<Array<{ address: string; family: 4 | 6 }>> {
+	const addresses = await lookupDns(hostname, { all: true, verbatim: true });
+	return addresses
+		.filter((entry): entry is { address: string; family: 4 | 6 } => entry.family === 4 || entry.family === 6)
+		.map((entry) => ({ address: entry.address, family: entry.family }));
+}
 
 function defaultLogger(_message: string, _details: Record<string, unknown> = {}): void {
 	// Extension logging is file-based and injected by the extension entry point when enabled.
@@ -177,13 +195,180 @@ function parseInteger(value: string | undefined): number | undefined {
 	return parsed;
 }
 
-function isValidHttpUrl(value: string): boolean {
+function isPrivateOrReservedIPv4(address: string): boolean {
+	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+	if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+		return true;
+	}
+
+	const [a = 0, b = 0] = parts;
+	return (
+		a === 0
+		|| a === 10
+		|| a === 127
+		|| (a === 100 && b >= 64 && b <= 127)
+		|| (a === 169 && b === 254)
+		|| (a === 172 && b >= 16 && b <= 31)
+		|| (a === 192 && b === 168)
+		|| (a === 198 && (b === 18 || b === 19))
+		|| a >= 224
+	);
+}
+
+function isPrivateOrReservedIPv6(address: string): boolean {
+	const normalized = address.toLowerCase();
+	if (normalized === "::" || normalized === "::1") {
+		return true;
+	}
+
+	const mappedIPv4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+	if (mappedIPv4) {
+		return isPrivateOrReservedIPv4(mappedIPv4);
+	}
+
+	return (
+		normalized.startsWith("fc")
+		|| normalized.startsWith("fd")
+		|| normalized.startsWith("fe8")
+		|| normalized.startsWith("fe9")
+		|| normalized.startsWith("fea")
+		|| normalized.startsWith("feb")
+		|| normalized.startsWith("ff")
+	);
+}
+
+function isPrivateOrReservedAddress(address: string): boolean {
+	const family = isIP(address);
+	if (family === 4) {
+		return isPrivateOrReservedIPv4(address);
+	}
+	if (family === 6) {
+		return isPrivateOrReservedIPv6(address);
+	}
+	return true;
+}
+
+function normalizeUrlHostname(hostname: string): string {
+	return hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+}
+
+function isInternalHostname(hostname: string): boolean {
+	const normalized = normalizeUrlHostname(hostname).toLowerCase().replace(/\.$/, "");
+	return (
+		normalized === "localhost"
+		|| normalized.endsWith(".localhost")
+		|| normalized.endsWith(".local")
+		|| normalized.endsWith(".internal")
+		|| normalized.endsWith(".lan")
+		|| normalized.endsWith(".home.arpa")
+	);
+}
+
+export function isWebhookUrlAllowed(value: string): boolean {
 	try {
 		const parsed = new URL(value);
-		return parsed.protocol === "https:" || parsed.protocol === "http:";
+		if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+			return false;
+		}
+
+		const hostname = normalizeUrlHostname(parsed.hostname);
+		if (isInternalHostname(hostname)) {
+			return false;
+		}
+
+		return isIP(hostname) === 0 || !isPrivateOrReservedAddress(hostname);
 	} catch {
 		return false;
 	}
+}
+
+interface PinnedWebhookDestination {
+	allowed: boolean;
+	reason?: string;
+	dispatcher?: Dispatcher;
+}
+
+function normalizeHostnameForComparison(hostname: string): string {
+	return normalizeUrlHostname(hostname).toLowerCase().replace(/\.$/, "");
+}
+
+function selectPinnedAddress(
+	addresses: readonly { address: string; family: 4 | 6 }[],
+	options: unknown,
+): { address: string; family: 4 | 6 } {
+	const requestedFamily = typeof options === "number"
+		? options
+		: options && typeof options === "object" && "family" in options
+			? (options as { family?: unknown }).family
+			: undefined;
+
+	if (requestedFamily === 4 || requestedFamily === 6) {
+		return addresses.find((entry) => entry.family === requestedFamily) ?? addresses[0]!;
+	}
+
+	return addresses[0]!;
+}
+
+function createPinnedDispatcher(hostname: string, addresses: readonly { address: string; family: 4 | 6 }[]): Dispatcher {
+	const expectedHostname = normalizeHostnameForComparison(hostname);
+	return new Agent({
+		connect: {
+			lookup: (lookupHostname: string, options: unknown, callback: (...args: unknown[]) => void): void => {
+				if (normalizeHostnameForComparison(lookupHostname) !== expectedHostname) {
+					callback(new Error("Webhook DNS pinning rejected an unexpected lookup host."));
+					return;
+				}
+
+				const wantsAll = options && typeof options === "object" && (options as { all?: unknown }).all === true;
+				if (wantsAll) {
+					callback(null, addresses.map((entry) => ({ address: entry.address, family: entry.family })));
+					return;
+				}
+
+				const selected = selectPinnedAddress(addresses, options);
+				callback(null, selected.address, selected.family);
+			},
+		},
+	} as never);
+}
+
+async function validateWebhookDestination(
+	value: string,
+	dnsLookup: WebhookDnsLookup,
+): Promise<PinnedWebhookDestination> {
+	if (!isWebhookUrlAllowed(value)) {
+		return { allowed: false, reason: "Webhook URL must target a public http(s) host." };
+	}
+
+	const parsed = new URL(value);
+	const hostname = normalizeUrlHostname(parsed.hostname);
+	if (isIP(hostname) !== 0) {
+		return { allowed: true };
+	}
+
+	let addresses: Array<{ address: string; family: 4 | 6 }>;
+	try {
+		addresses = await dnsLookup(hostname);
+	} catch (error) {
+		return {
+			allowed: false,
+			reason: `Webhook host DNS validation failed: ${getErrorMessage(error)}`,
+		};
+	}
+
+	if (addresses.length === 0) {
+		return { allowed: false, reason: "Webhook host did not resolve to a connectable address." };
+	}
+
+	if (addresses.some((entry) => isPrivateOrReservedAddress(entry.address))) {
+		return { allowed: false, reason: "Webhook host resolved to a private or reserved network address." };
+	}
+
+	return { allowed: true, dispatcher: createPinnedDispatcher(hostname, addresses) };
+}
+
+function isValidHttpUrl(value: string): boolean {
+	return isWebhookUrlAllowed(value);
 }
 
 function isDiscordUrl(value: string): boolean {
@@ -338,6 +523,8 @@ function resolveConfig(config: WebhookConfig = {}, env: NodeJS.ProcessEnv = proc
 	const requestTimeoutMs = Math.max(500, merged.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 
 	const logger = merged.logger ?? defaultLogger;
+	const dnsLookup = merged.dnsLookup ?? defaultDnsLookup;
+	const fetchImpl = merged.fetch ?? fetch;
 	const targets = resolveTargets(merged);
 	const isEnabled = merged.enabled === true && targets.length > 0;
 
@@ -355,6 +542,8 @@ function resolveConfig(config: WebhookConfig = {}, env: NodeJS.ProcessEnv = proc
 		discordUsername: merged.discordUsername,
 		discordAvatarUrl: merged.discordAvatarUrl,
 		logger,
+		dnsLookup,
+		fetch: fetchImpl,
 	};
 }
 
@@ -639,6 +828,11 @@ export class WebhookService {
 	}
 
 	private async sendOnce(target: ResolvedWebhookTarget, event: WebhookEvent, externalSignal?: AbortSignal): Promise<SendAttemptResult> {
+		const destination = await validateWebhookDestination(target.url, this.config.dnsLookup);
+		if (!destination.allowed) {
+			return { success: false, statusCode: 400, error: destination.reason ?? "Webhook URL was blocked." };
+		}
+
 		this.markRequest(target);
 		const payload =
 			target.provider === "discord"
@@ -666,12 +860,17 @@ export class WebhookService {
 		};
 
 		try {
-			const response = await fetch(target.url, {
+			const requestOptions: RequestInit & { dispatcher?: Dispatcher } = {
 				method: "POST",
 				headers,
 				body: JSON.stringify(payload),
 				signal: controller.signal,
-			});
+			};
+			if (destination.dispatcher) {
+				requestOptions.dispatcher = destination.dispatcher;
+			}
+
+			const response = await this.config.fetch(target.url, requestOptions);
 
 			if (response.status === 429) {
 				const retryAfterMs = parseRetryAfterMs(response.headers.get("Retry-After"));
@@ -706,6 +905,7 @@ export class WebhookService {
 		} finally {
 			clearTimeout(timeout);
 			externalSignal?.removeEventListener("abort", onExternalAbort);
+			await destination.dispatcher?.close();
 		}
 	}
 }

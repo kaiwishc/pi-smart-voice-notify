@@ -1,6 +1,6 @@
 import { constants as fsConstants } from "node:fs";
 import { access, readdir, readFile, stat } from "node:fs/promises";
-import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { getCurrentVolume, playAudio, setVolume } from "./linux.ts";
@@ -82,8 +82,15 @@ const EVENT_TO_CATEGORY: Record<string, SoundCategory> = {
 	idle: "success",
 	permission: "alert",
 	question: "notification",
+	complete: "success",
+	completed: "success",
+	completion: "success",
+	agent_complete: "success",
+	agent_completed: "success",
 	task_complete: "success",
+	task_completed: "success",
 	taskcomplete: "success",
+	taskcompleted: "success",
 };
 
 const DEFAULT_ASSETS_DIRECTORY = fileURLToPath(new URL("../assets", import.meta.url));
@@ -248,6 +255,7 @@ async function resolveThemeDirectories(config: SoundThemeConfig, assetsDirectory
 	for (const customDirectory of config.customSoundDirectories ?? []) {
 		directories.push(customDirectory);
 	}
+	directories.push(dirname(assetsDirectory));
 	directories.push(assetsDirectory);
 
 	const uniqueDirectories = uniquePaths(directories);
@@ -309,8 +317,13 @@ export class SoundThemeService {
 			this.assetsDirectory,
 		);
 
+		const assetsRootDirectory = resolve(dirname(this.assetsDirectory));
 		const themeDirectory =
-			projectContext?.soundsDirectory ?? directories.find((directory) => directory !== this.assetsDirectory) ?? null;
+			projectContext?.soundsDirectory ??
+			directories.find(
+				(directory) => directory !== this.assetsDirectory && directory !== assetsRootDirectory,
+			) ??
+			null;
 		const manifest = themeDirectory ? await loadManifest(themeDirectory) : null;
 		const fallbackSounds = await buildFallbackSounds(this.assetsDirectory);
 		const soundsByCategory: Record<SoundCategory, string[]> = {

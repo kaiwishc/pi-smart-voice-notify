@@ -1,4 +1,4 @@
-import { exec, spawn } from "child_process";
+import { spawn } from "child_process";
 
 import { getErrorMessage } from "./logging.ts";
 import type {
@@ -10,8 +10,6 @@ import type {
 
 const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_AUDIO_TIMEOUT_MS = 20_000;
-const MAX_BUFFER_BYTES = 1024 * 1024;
-
 type DebugLog = (message: string) => void;
 
 function createDebugLog(options?: LinuxUtilsOptions): DebugLog {
@@ -74,34 +72,6 @@ async function runSpawnCommand(
 						: undefined,
 			});
 		});
-	});
-}
-
-async function runExecCommand(command: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<LinuxCommandResult> {
-	return await new Promise<LinuxCommandResult>((resolve) => {
-		exec(
-			command,
-			{ timeout: timeoutMs, maxBuffer: MAX_BUFFER_BYTES },
-			(error, stdout, stderr) => {
-				const maybeError = error as (Error & {
-					code?: number;
-					signal?: NodeJS.Signals;
-					killed?: boolean;
-				}) | null;
-				const timedOut = maybeError?.killed === true;
-				resolve({
-					command,
-					args: [],
-					exitCode: typeof maybeError?.code === "number" ? maybeError.code : 0,
-					signal: maybeError?.signal ?? null,
-					stdout,
-					stderr,
-					success: !error,
-					timedOut,
-					errorMessage: error ? getErrorMessage(error) : undefined,
-				});
-			},
-		);
 	});
 }
 
@@ -326,7 +296,7 @@ export async function getIdleTime(options: LinuxUtilsOptions = {}): Promise<numb
 		return -1;
 	}
 
-	const result = await runExecCommand("xprintidle", 6_000);
+	const result = await runSpawnCommand("xprintidle", [], 6_000);
 	if (!result.success) {
 		debugLog(
 			`getIdleTime: xprintidle failed (exitCode=${result.exitCode}, stderr=${result.stderr.trim() || result.errorMessage || "none"})`,

@@ -2,8 +2,8 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
-import type { SettingItem } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import type { SettingItem } from "@earendil-works/pi-tui";
 import { basename } from "node:path";
 
 import { initializeAIMessageService, type AIMessageConfig } from "./ai-messages.ts";
@@ -110,21 +110,15 @@ function classifyToolResult(
 	const normalizedTool = toolName.toLowerCase();
 	const normalizedText = textContent.toLowerCase().slice(0, 800);
 
-	if (!isError) {
-		if (normalizedTool.includes("question")) {
-			return "question";
-		}
-		if (QUESTION_HINTS.some((hint) => normalizedText.includes(hint))) {
-			return "question";
-		}
-		return null;
-	}
-
 	if (normalizedTool.includes("question")) {
 		return "question";
 	}
+	// Tool errors are often recoverable within the same turn; terminal failures are handled at agent_end.
+	if (!isError && QUESTION_HINTS.some((hint) => normalizedText.includes(hint))) {
+		return "question";
+	}
 
-	return "error";
+	return null;
 }
 
 type AgentEndStatus = "completed" | "error" | "aborted";
@@ -389,6 +383,7 @@ export default function smartVoiceNotifyExtension(
 	let activeSessionContext: ExtensionContext | null = null;
 	let shutdownRequested = false;
 	let shutdownPromise: Promise<void> | null = null;
+	let pendingAgentErrorNotification: NodeJS.Timeout | null = null;
 
 	const pendingReminders = new Map<ReminderKey, ReminderState>();
 	const reminderPlayback = new ReminderPlaybackController();
@@ -426,6 +421,10 @@ export default function smartVoiceNotifyExtension(
 	);
 	const notifyWhenFocused = envBoolean(false, "PI_SMART_NOTIFY_NOTIFY_WHEN_FOCUSED");
 	const focusTimeoutMs = Math.max(500, envInteger(1_500, "PI_SMART_NOTIFY_FOCUS_TIMEOUT_MS"));
+	const agentErrorNotificationGraceMs = Math.max(
+		0,
+		envInteger(10_000, "PI_SMART_NOTIFY_AGENT_ERROR_GRACE_MS"),
+	);
 	const soundThemeService = new SoundThemeService({
 		debugLog: (message) => {
 			logger.debug("sound_theme.debug", { message });
@@ -1298,6 +1297,52 @@ export default function smartVoiceNotifyExtension(
 		);
 	};
 
+	const cancelPendingAgentErrorNotification = (reason: string): void => {
+		if (!pendingAgentErrorNotification) {
+			return;
+		}
+
+		clearTimeout(pendingAgentErrorNotification);
+		pendingAgentErrorNotification = null;
+		logger.debug("agent.error_notification.cancelled", { reason });
+	};
+
+	const scheduleAgentErrorNotification = (ctx: ExtensionContext, outcome: AgentEndOutcome): void => {
+		cancelPendingAgentErrorNotification("rescheduled");
+		if (!config.enabled || !config.enableErrorNotification) {
+			return;
+		}
+
+		const timeoutId = setTimeout(() => {
+			if (pendingAgentErrorNotification !== timeoutId) {
+				return;
+			}
+			pendingAgentErrorNotification = null;
+
+			if (shutdownRequested || !config.enabled || !config.enableErrorNotification) {
+				logger.debug("agent.error_notification.skipped", {
+					reason: shutdownRequested ? "session_shutdown" : "disabled",
+				});
+				return;
+			}
+
+			logger.debug("agent.error_notification.fired", {
+				reason: outcome.reason,
+				graceMs: agentErrorNotificationGraceMs,
+			});
+			triggerNotification("error", ctx, {
+				customMessage: formatAgentErrorNotification(outcome.reason),
+				reason: outcome.reason,
+			});
+		}, agentErrorNotificationGraceMs);
+		timeoutId.unref?.();
+		pendingAgentErrorNotification = timeoutId;
+		logger.debug("agent.error_notification.scheduled", {
+			reason: outcome.reason,
+			graceMs: agentErrorNotificationGraceMs,
+		});
+	};
+
 	const resetPermissionBatch = (reason: string): void => {
 		permissionBatchGeneration += 1;
 
@@ -1701,6 +1746,7 @@ export default function smartVoiceNotifyExtension(
 
 		shutdownRequested = false;
 		shutdownPromise = null;
+		cancelPendingAgentErrorNotification("session_start");
 		config = readConfig();
 		refreshIntegratedServiceConfig();
 		activeSessionContext = ctx;
@@ -1749,6 +1795,7 @@ export default function smartVoiceNotifyExtension(
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		shutdownRequested = true;
+		cancelPendingAgentErrorNotification("session_shutdown");
 		if (shutdownPromise) {
 			await shutdownPromise;
 			return;
@@ -1787,11 +1834,13 @@ export default function smartVoiceNotifyExtension(
 	pi.on("input", async (event) => {
 		if (event.source !== "extension") {
 			lastUserActivityAt = Date.now();
+			cancelPendingAgentErrorNotification("user_input");
 			cancelReminderActivity("user_input", { source: event.source });
 		}
 	});
 
 	pi.on("agent_start", async () => {
+		cancelPendingAgentErrorNotification("agent_start");
 		hadErrorInTurn = false;
 		pendingPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
@@ -1835,10 +1884,6 @@ export default function smartVoiceNotifyExtension(
 			return;
 		}
 
-		if (event.isError) {
-			hadErrorInTurn = true;
-		}
-
 		logger.debug("tool_result.classified", {
 			toolCallId: event.toolCallId,
 			toolName,
@@ -1857,13 +1902,9 @@ export default function smartVoiceNotifyExtension(
 			hadErrorInTurn = true;
 			logger.debug("agent.end.error_detected", {
 				reason: outcome.reason,
+				graceMs: agentErrorNotificationGraceMs,
 			});
-			if (config.enabled && config.enableErrorNotification) {
-				triggerNotification("error", ctx, {
-					customMessage: formatAgentErrorNotification(outcome.reason),
-					reason: outcome.reason,
-				});
-			}
+			scheduleAgentErrorNotification(ctx, outcome);
 			return;
 		}
 		if (outcome.status === "aborted") {

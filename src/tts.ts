@@ -55,6 +55,8 @@ const EMPTY_AVAILABILITY: TTSAvailability = {
 	sapi: false,
 };
 
+const MAX_TTS_AUDIO_RESPONSE_BYTES = 10 * 1024 * 1024;
+
 function fromEnv(...keys: string[]): string {
 	for (const key of keys) {
 		const value = process.env[key];
@@ -146,6 +148,90 @@ function throwIfAborted(signal?: AbortSignal): void {
 		error.name = "AbortError";
 		throw error;
 	}
+}
+
+function createAbortError(message: string): Error {
+	const error = new Error(message);
+	error.name = "AbortError";
+	return error;
+}
+
+function createFetchTimeoutSignal(timeoutMs: number, signal?: AbortSignal): { cleanup: () => void; signal: AbortSignal } {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => {
+		controller.abort(createAbortError("Speech request timed out."));
+	}, Math.max(1, timeoutMs));
+
+	const abortFromCaller = (): void => {
+		controller.abort(createAbortError("Speech request aborted."));
+	};
+
+	if (signal?.aborted) {
+		abortFromCaller();
+	} else {
+		signal?.addEventListener("abort", abortFromCaller, { once: true });
+	}
+
+	return {
+		signal: controller.signal,
+		cleanup: () => {
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", abortFromCaller);
+		},
+	};
+}
+
+async function readAudioResponseWithLimit(
+	response: Response,
+	maxBytes: number,
+	signal?: AbortSignal,
+): Promise<Buffer> {
+	const contentLength = response.headers.get("content-length");
+	if (contentLength) {
+		const parsedLength = Number(contentLength);
+		if (Number.isFinite(parsedLength) && parsedLength > maxBytes) {
+			await response.body?.cancel().catch(() => {});
+			throw new Error(`TTS audio response exceeded ${maxBytes} bytes.`);
+		}
+	}
+
+	if (!response.body) {
+		return Buffer.alloc(0);
+	}
+
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+
+	try {
+		while (true) {
+			throwIfAborted(signal);
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+			if (!value) {
+				continue;
+			}
+
+			totalBytes += value.byteLength;
+			if (totalBytes > maxBytes) {
+				throw new Error(`TTS audio response exceeded ${maxBytes} bytes.`);
+			}
+			chunks.push(value);
+		}
+	} catch (error) {
+		await reader.cancel().catch(() => {});
+		throw error;
+	} finally {
+		reader.releaseLock();
+	}
+
+	throwIfAborted(signal);
+	return Buffer.concat(
+		chunks.map((chunk) => Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)),
+		totalBytes,
+	);
 }
 
 async function runSpawnCommand(
@@ -285,6 +371,10 @@ class TTSEngineService implements TTSService {
 			push(requestedEngine);
 		} else if (config.ttsEngine !== "auto") {
 			push(config.ttsEngine);
+		}
+
+		if (process.platform === "linux" && requestedEngine === "auto" && config.ttsEngine === "auto") {
+			push("espeak-ng");
 		}
 
 		if (config.elevenLabsApiKey.trim().length > 0) {
@@ -427,6 +517,7 @@ class TTSEngineService implements TTSService {
 
 		throwIfAborted(signal);
 		const tempFile = this.createTempFilePath("elevenlabs", "mp3");
+		const fetchSignal = createFetchTimeoutSignal(config.commandTimeoutMs, signal);
 		try {
 			const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(config.elevenLabsVoiceId)}`;
 			const response = await fetch(endpoint, {
@@ -435,7 +526,7 @@ class TTSEngineService implements TTSService {
 					"content-type": "application/json",
 					"xi-api-key": config.elevenLabsApiKey,
 				},
-				signal,
+				signal: fetchSignal.signal,
 				body: JSON.stringify({
 					text,
 					model_id: config.elevenLabsModel,
@@ -453,9 +544,13 @@ class TTSEngineService implements TTSService {
 				return false;
 			}
 
-			throwIfAborted(signal);
-			const audioBuffer = await response.arrayBuffer();
-			await writeFile(tempFile, Buffer.from(audioBuffer));
+			throwIfAborted(fetchSignal.signal);
+			const audioBuffer = await readAudioResponseWithLimit(
+				response,
+				MAX_TTS_AUDIO_RESPONSE_BYTES,
+				fetchSignal.signal,
+			);
+			await writeFile(tempFile, audioBuffer);
 			throwIfAborted(signal);
 			return await this.playAudioFile(tempFile, signal);
 		} catch (error) {
@@ -466,6 +561,7 @@ class TTSEngineService implements TTSService {
 			this.debug("tts.elevenlabs.error", { error: getErrorMessage(error) });
 			return false;
 		} finally {
+			fetchSignal.cleanup();
 			await removeTempFile(tempFile);
 		}
 	}
@@ -478,6 +574,7 @@ class TTSEngineService implements TTSService {
 		throwIfAborted(signal);
 		const format = config.openaiTtsFormat.trim() || "mp3";
 		const tempFile = this.createTempFilePath("openai", format);
+		const fetchSignal = createFetchTimeoutSignal(config.commandTimeoutMs, signal);
 		try {
 			const endpoint = this.normalizeOpenAIEndpoint(config.openaiTtsEndpoint);
 			const headers: Record<string, string> = {
@@ -490,7 +587,7 @@ class TTSEngineService implements TTSService {
 			const response = await fetch(endpoint, {
 				method: "POST",
 				headers,
-				signal,
+				signal: fetchSignal.signal,
 				body: JSON.stringify({
 					model: config.openaiTtsModel,
 					input: text,
@@ -505,9 +602,13 @@ class TTSEngineService implements TTSService {
 				return false;
 			}
 
-			throwIfAborted(signal);
-			const audioBuffer = await response.arrayBuffer();
-			await writeFile(tempFile, Buffer.from(audioBuffer));
+			throwIfAborted(fetchSignal.signal);
+			const audioBuffer = await readAudioResponseWithLimit(
+				response,
+				MAX_TTS_AUDIO_RESPONSE_BYTES,
+				fetchSignal.signal,
+			);
+			await writeFile(tempFile, audioBuffer);
 			throwIfAborted(signal);
 			return await this.playAudioFile(tempFile, signal);
 		} catch (error) {
@@ -518,6 +619,7 @@ class TTSEngineService implements TTSService {
 			this.debug("tts.openai.error", { error: getErrorMessage(error) });
 			return false;
 		} finally {
+			fetchSignal.cleanup();
 			await removeTempFile(tempFile);
 		}
 	}

@@ -1,4 +1,4 @@
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -15,6 +15,8 @@ const SESSION_FORWARDING_REQUESTS_DIRECTORY_NAME = "requests";
 const SESSION_FORWARDING_RESPONSES_DIRECTORY_NAME = "responses";
 const PERMISSION_FORWARDING_TIMEOUT_MS = 10 * 60 * 1000;
 const SCAN_INTERVAL_MS = 1_500;
+const MAX_TRACKED_PARSE_FAILURE_FILES = 200;
+const MAX_PARSE_FAILURE_ATTEMPTS_PER_FILE = 50;
 
 type WatchDirectoryKind = "requests" | "responses";
 
@@ -189,7 +191,7 @@ export class PermissionForwardingWatcher {
 	private readonly parseFailureCountByFile = new Map<string, number>();
 	private readonly missingDirectoryLogged = new Set<string>();
 	private legacyPathWarningLogged = false;
-	private scanTimer: NodeJS.Timeout | null = null;
+	private fallbackScanTimer: NodeJS.Timeout | null = null;
 	private scanQueued = false;
 	private config: PermissionForwardingWatcherConfig = {
 		enabled: true,
@@ -220,13 +222,7 @@ export class PermissionForwardingWatcher {
 		this.logLegacyPathIgnoredIfNeeded();
 		this.ensureWatchers();
 		this.scan("startup");
-		if (!this.scanTimer) {
-			this.scanTimer = setInterval(() => {
-				this.ensureWatchers();
-				this.queueScan("interval");
-			}, SCAN_INTERVAL_MS);
-			this.scanTimer.unref?.();
-		}
+		this.refreshFallbackScanTimer();
 	}
 
 	public updateConfig(config: PermissionForwardingWatcherConfig): void {
@@ -235,21 +231,55 @@ export class PermissionForwardingWatcher {
 
 	public stop(): void {
 		this.closeAllWatchers();
-		this.clearScanTimer();
+		this.clearFallbackScanTimer();
 		this.resolveTrackedRequests("watcher_stopped");
 	}
 
 	private deactivate(reason: ForwardedPermissionResolutionReason): void {
 		this.closeAllWatchers();
-		this.clearScanTimer();
+		this.clearFallbackScanTimer();
 		this.resolveTrackedRequests(reason);
 	}
 
-	private clearScanTimer(): void {
-		if (this.scanTimer) {
-			clearInterval(this.scanTimer);
-			this.scanTimer = null;
+	private clearFallbackScanTimer(): void {
+		if (this.fallbackScanTimer) {
+			clearInterval(this.fallbackScanTimer);
+			this.fallbackScanTimer = null;
 		}
+	}
+
+	private hasAllRequiredWatchers(): boolean {
+		const directories = this.getDirectories();
+		if (directories.length === 0) {
+			return false;
+		}
+
+		return directories.every((directory) => existsSync(directory.path) && this.watchers.has(getWatcherKey(directory)));
+	}
+
+	private refreshFallbackScanTimer(): void {
+		if (!this.config.enabled || !normalizePermissionForwardingSessionId(this.config.targetSessionId)) {
+			this.clearFallbackScanTimer();
+			return;
+		}
+
+		if (this.hasAllRequiredWatchers()) {
+			this.clearFallbackScanTimer();
+			return;
+		}
+
+		if (this.fallbackScanTimer) {
+			return;
+		}
+
+		this.fallbackScanTimer = setInterval(() => {
+			this.ensureWatchers();
+			this.queueScan("fallback_interval");
+			if (this.hasAllRequiredWatchers()) {
+				this.clearFallbackScanTimer();
+			}
+		}, SCAN_INTERVAL_MS);
+		this.fallbackScanTimer.unref?.();
 	}
 
 	private queueScan(reason: string): void {
@@ -350,6 +380,7 @@ export class PermissionForwardingWatcher {
 						error: getErrorMessage(error),
 					});
 					this.closeWatcher(watcherKey);
+					this.refreshFallbackScanTimer();
 				});
 				this.watchers.set(watcherKey, watcher);
 				this.debugLog("permission_forwarding.watcher.started", {
@@ -366,6 +397,7 @@ export class PermissionForwardingWatcher {
 				});
 			}
 		}
+		this.refreshFallbackScanTimer();
 	}
 
 	private closeWatcher(watcherKey: string): void {
@@ -401,6 +433,7 @@ export class PermissionForwardingWatcher {
 		}
 
 		const seenRequestKeys = new Set<string>();
+		const currentRequestFilePaths = new Set<string>();
 		let hasAuthoritativeRequestState = false;
 		if (!existsSync(location.requestsDir)) {
 			hasAuthoritativeRequestState = true;
@@ -426,11 +459,32 @@ export class PermissionForwardingWatcher {
 				continue;
 			}
 			const filePath = join(location.requestsDir, fileName);
+			currentRequestFilePaths.add(filePath);
 			this.processRequestFile(filePath, location, seenRequestKeys);
 		}
 
 		if (hasAuthoritativeRequestState) {
+			this.cleanupParseFailureCounts(currentRequestFilePaths);
 			this.resolveMissingRequests(seenRequestKeys, new Set([location.source]));
+		}
+	}
+
+	private cleanupParseFailureCounts(currentRequestFilePaths: ReadonlySet<string>): void {
+		for (const filePath of this.parseFailureCountByFile.keys()) {
+			if (!currentRequestFilePaths.has(filePath)) {
+				this.parseFailureCountByFile.delete(filePath);
+			}
+		}
+		this.enforceParseFailureMapLimit();
+	}
+
+	private enforceParseFailureMapLimit(): void {
+		while (this.parseFailureCountByFile.size > MAX_TRACKED_PARSE_FAILURE_FILES) {
+			const oldestFilePath = this.parseFailureCountByFile.keys().next().value;
+			if (typeof oldestFilePath !== "string") {
+				return;
+			}
+			this.parseFailureCountByFile.delete(oldestFilePath);
 		}
 	}
 
@@ -443,9 +497,15 @@ export class PermissionForwardingWatcher {
 		try {
 			request = readForwardedPermissionRequestFile(filePath);
 		} catch (error) {
-			const attemptCount = (this.parseFailureCountByFile.get(filePath) ?? 0) + 1;
+			const previousAttemptCount = this.parseFailureCountByFile.get(filePath) ?? 0;
+			const attemptCount = Math.min(previousAttemptCount + 1, MAX_PARSE_FAILURE_ATTEMPTS_PER_FILE);
 			this.parseFailureCountByFile.set(filePath, attemptCount);
-			if (attemptCount === 1 || attemptCount % 10 === 0) {
+			this.enforceParseFailureMapLimit();
+			if (
+				attemptCount === 1
+				|| (attemptCount % 10 === 0 && attemptCount !== previousAttemptCount)
+				|| (attemptCount === MAX_PARSE_FAILURE_ATTEMPTS_PER_FILE && previousAttemptCount < attemptCount)
+			) {
 				this.debugLog("permission_forwarding.scan.read_or_parse_failed", {
 					source: location.source,
 					filePath,

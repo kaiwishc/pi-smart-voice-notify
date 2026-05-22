@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
 
 export function getErrorMessage(error: unknown): string {
 	if (error instanceof Error) {
@@ -40,10 +40,22 @@ interface LoggerOptions {
 export interface ExtensionLogger {
 	debug: (event: string, details?: Record<string, unknown>) => void;
 	error: (error: unknown) => void;
+	flush: () => Promise<void>;
 }
 
 export function createExtensionLogger(options: LoggerOptions): ExtensionLogger {
 	const { extensionId, debugLogPath, isDebugEnabled, ensureDebugDirectory } = options;
+	let writeQueue: Promise<void> = Promise.resolve();
+
+	const enqueueAppend = (line: string): void => {
+		writeQueue = writeQueue.then(
+			() => appendFile(debugLogPath, `${line}\n`, "utf-8"),
+			() => appendFile(debugLogPath, `${line}\n`, "utf-8"),
+		);
+		void writeQueue.catch(() => {
+			// Debug logging must never write to stdout/stderr from extension code.
+		});
+	};
 
 	const debug = (event: string, details: Record<string, unknown> = {}): void => {
 		if (!isDebugEnabled()) {
@@ -58,7 +70,7 @@ export function createExtensionLogger(options: LoggerOptions): ExtensionLogger {
 				event,
 				...details,
 			});
-			appendFileSync(debugLogPath, `${line}\n`, "utf-8");
+			enqueueAppend(line);
 		} catch {
 			// Debug logging must never write to stdout/stderr from extension code.
 		}
@@ -68,5 +80,7 @@ export function createExtensionLogger(options: LoggerOptions): ExtensionLogger {
 		debug("runtime.error", { error: cause });
 	};
 
-	return { debug, error };
+	const flush = (): Promise<void> => writeQueue.catch(() => undefined);
+
+	return { debug, error, flush };
 }

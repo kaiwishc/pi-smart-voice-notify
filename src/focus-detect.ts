@@ -1,5 +1,4 @@
-import { exec, type ExecOptionsWithStringEncoding } from "node:child_process";
-import { promisify } from "node:util";
+import { runAbortableCommand } from "./abortable-command.ts";
 import { getErrorMessage } from "./logging.ts";
 
 export type LinuxSessionType = "x11" | "wayland" | "unknown";
@@ -33,13 +32,6 @@ interface SwayTreeNode {
 }
 
 type WaylandDesktop = "sway" | "gnome" | "unknown";
-
-type ExecAsync = (
-	command: string,
-	options?: ExecOptionsWithStringEncoding,
-) => Promise<{ stdout: string; stderr: string }>;
-
-const execAsync = promisify(exec) as ExecAsync;
 
 const DEFAULT_TIMEOUT_MS = 1500;
 const DEFAULT_CACHE_TTL_MS = 400;
@@ -197,6 +189,7 @@ function detectWaylandDesktop(env: NodeJS.ProcessEnv = process.env): WaylandDesk
 
 async function runCommand(
 	command: string,
+	args: readonly string[],
 	label: string,
 	options: FocusDetectOptions,
 	maxBuffer = DEFAULT_MAX_BUFFER,
@@ -204,17 +197,26 @@ async function runCommand(
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
 	try {
-		const { stdout, stderr } = await execAsync(command, {
-			encoding: "utf8",
-			timeout: timeoutMs,
-			maxBuffer,
-		});
-
-		if (stderr.trim()) {
-			emitLog("debug", `${label}: stderr`, options, { stderr: stderr.trim() });
+		const result = await runAbortableCommand(command, args, { timeoutMs });
+		if (result.stdout.length + result.stderr.length > maxBuffer) {
+			emitLog("error", `${label}: command output exceeded buffer`, options, { command });
+			return null;
 		}
 
-		const output = stdout.trim();
+		if (result.stderr.trim()) {
+			emitLog("debug", `${label}: stderr`, options, { stderr: result.stderr.trim() });
+		}
+
+		if (result.code !== 0) {
+			const detail = (result.errorMessage ?? result.stderr.trim()) || `exit code ${result.code}`;
+			emitLog("error", `${label}: command failed`, options, {
+				command,
+				error: detail,
+			});
+			return null;
+		}
+
+		const output = result.stdout.trim();
 		if (!output) {
 			emitLog("debug", `${label}: empty output`, options);
 			return null;
@@ -243,12 +245,17 @@ function getEncodedPowerShellScript(script: string): string {
 
 async function getFocusedWindowWindows(options: FocusDetectOptions): Promise<string | null> {
 	const encodedScript = getEncodedPowerShellScript(POWERSHELL_GET_FRONTMOST_PROCESS);
-	const command = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedScript}`;
-	return runCommand(command, "windows.powershell.frontmost_process", options, 1024);
+	return runCommand(
+		"powershell",
+		["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript],
+		"windows.powershell.frontmost_process",
+		options,
+		1024,
+	);
 }
 
 async function getFocusedWindowX11(options: FocusDetectOptions): Promise<string | null> {
-	const activeWindow = await runCommand("xdotool getactivewindow", "x11.xdotool.getactivewindow", options);
+	const activeWindow = await runCommand("xdotool", ["getactivewindow"], "x11.xdotool.getactivewindow", options);
 	if (!activeWindow) {
 		return null;
 	}
@@ -260,7 +267,8 @@ async function getFocusedWindowX11(options: FocusDetectOptions): Promise<string 
 	}
 
 	const windowProps = await runCommand(
-		`xprop -id ${windowId} WM_CLASS WM_NAME _NET_WM_NAME`,
+		"xprop",
+		["-id", windowId, "WM_CLASS", "WM_NAME", "_NET_WM_NAME"],
 		"x11.xprop.window",
 		options,
 	);
@@ -293,7 +301,7 @@ function findFocusedSwayNode(node: SwayTreeNode): SwayTreeNode | null {
 }
 
 async function getFocusedWindowWaylandSway(options: FocusDetectOptions): Promise<string | null> {
-	const treeOutput = await runCommand("swaymsg -t get_tree", "wayland.sway.get_tree", options, 8 * 1024 * 1024);
+	const treeOutput = await runCommand("swaymsg", ["-t", "get_tree"], "wayland.sway.get_tree", options, 8 * 1024 * 1024);
 	if (!treeOutput) {
 		return null;
 	}
@@ -342,10 +350,25 @@ function parseGnomeEvalResult(output: string): string | null {
 }
 
 async function getFocusedWindowWaylandGnome(options: FocusDetectOptions): Promise<string | null> {
-	const command =
-		"gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.gnome.Shell.Eval '(() => { const w = global.display.focus_window; if (!w) return \"\"; return [w.get_wm_class_instance && w.get_wm_class_instance(), w.get_wm_class && w.get_wm_class(), w.get_title && w.get_title()].filter(Boolean).join(\" \"); })()'";
+	const script =
+		'(() => { const w = global.display.focus_window; if (!w) return ""; return [w.get_wm_class_instance && w.get_wm_class_instance(), w.get_wm_class && w.get_wm_class(), w.get_title && w.get_title()].filter(Boolean).join(" "); })()';
 
-	const evalOutput = await runCommand(command, "wayland.gnome.gdbus", options);
+	const evalOutput = await runCommand(
+		"gdbus",
+		[
+			"call",
+			"--session",
+			"--dest",
+			"org.gnome.Shell",
+			"--object-path",
+			"/org/gnome/Shell",
+			"--method",
+			"org.gnome.Shell.Eval",
+			script,
+		],
+		"wayland.gnome.gdbus",
+		options,
+	);
 	if (!evalOutput) {
 		return null;
 	}
