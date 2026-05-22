@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0] - 2026-05-22
+
+### Added
+- Added `PI_SMART_NOTIFY_AGENT_ERROR_GRACE_MS` to delay agent-error notifications briefly so related idle/error state can settle before notifying.
+- Added webhook destination hardening with public HTTP(S)-only validation, private/reserved host rejection, DNS validation, and DNS-pinned dispatch.
+
+### Changed
+- Added request timeouts and a 10 MiB audio response cap for remote ElevenLabs/OpenAI-compatible TTS fetches.
+- Improved Linux focus detection and moved debug log writes onto asynchronous file logging with flush support.
+- Reorganized checked-in tests into the dedicated `test/` directory with webhook, TTS, Linux, sound-theme, and notification coverage.
+
 ## [0.4.0] - 2026-04-30
 
 ### Added

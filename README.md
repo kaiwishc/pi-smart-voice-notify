@@ -16,6 +16,7 @@ Windows-optimized smart notification extension for the Pi coding agent.
   - **Voice** – auto-selectable TTS engines: Edge, espeak-ng, ElevenLabs, OpenAI-compatible, and Windows SAPI
   - **Desktop toasts** – cross-platform notifications via `node-notifier` (Windows/macOS/Linux)
   - **Webhook delivery** – optional Discord or generic HTTP webhook notifications
+    - Validates webhook targets as public HTTP(S) destinations and blocks localhost/private/reserved networks before dispatch
 
 - **Intelligent event detection**
   - Task completion (idle)
@@ -133,6 +134,9 @@ A starter template is provided in `config/config.example.json`. On startup, the 
 | `enableErrorNotification` | boolean | `true` | Notify on errors |
 | `suppressIdleAfterError` | boolean | `true` | Skip idle notification if turn had errors |
 
+
+Error notifications are delayed briefly before delivery so Pi can settle related turn state and suppress a redundant idle alert. Override the default 10000 ms delay with `PI_SMART_NOTIFY_AGENT_ERROR_GRACE_MS` when you need faster or slower error alerts.
+
 *Question notifications only work when a custom `question` tool is loaded.
 
 Forwarded permission watcher notifications use privacy-safe text, require the request `targetSessionId` to match the active Pi session, and never include raw forwarded `message` content.
@@ -187,6 +191,9 @@ Paths can be absolute or relative to the extension directory.
 | `aiMessages.caching.enabled` | boolean | `true` | Cache generated messages to reduce repeat calls |
 | `minNotificationIntervalMs` | number | `1500` | Throttle interval between same-type notifications |
 | `debugLog` | boolean | `false` | Enable debug logging to file |
+
+
+Webhook dispatch only attempts public `http`/`https` URLs. The extension rejects localhost-style names, `.local`/`.internal`/`.lan`/`.home.arpa` hosts, private or reserved IP literals, and hostnames whose DNS results include private or reserved addresses; validated DNS results are pinned for the outbound request. Use `PI_SMART_NOTIFY_WEBHOOK_TIMEOUT_MS` to override the default 8000 ms webhook request timeout.
 
 ## Notification Modes
 
