@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test, { mock, type TestContext } from "node:test";
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { DEFAULT_CONFIG } from "./config-store.ts";
-import smartVoiceNotifyExtension, { type SmartVoiceNotifyDependencies } from "./index.ts";
-import type { TTSAvailability, TTSConfig, TTSEngine, TTSService, SpeakOptions } from "./types/tts.ts";
-import type { VoiceNotifyConfig } from "./types.ts";
+import { DEFAULT_CONFIG } from "../src/config-store.ts";
+import smartVoiceNotifyExtension, { type SmartVoiceNotifyDependencies } from "../src/index.ts";
+import type { TTSAvailability, TTSConfig, TTSEngine, TTSService, SpeakOptions } from "../src/types/tts.ts";
+import type { VoiceNotifyConfig } from "../src/types.ts";
 
 interface FakeContext {
 	hasUI: boolean;
@@ -750,7 +750,7 @@ test("tool_result resolution keeps another permission reminder active while drop
 	assert.equal(countReminderCalls(ttsCalls), 1);
 });
 
-test("tool_result with the same toolCallId still classifies after a permission-system waiting event", async (t) => {
+test("tool_result errors resolve permission flows without error notifications while the agent can continue", async (t) => {
 	disableFocusDetection(t);
 	useMockClock(t);
 
@@ -783,7 +783,7 @@ test("tool_result with the same toolCallId still classifies after a permission-s
 	);
 	await flushAsyncWork();
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 2);
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
 });
 
 test("agent_end triggers an idle notification when idle notifications are enabled", async (t) => {

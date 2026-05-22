@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runAbortableCommand } from "./abortable-command.ts";
+import { runAbortableCommand } from "../src/abortable-command.ts";
 
 test("runAbortableCommand returns an aborted result when the signal is already aborted", async () => {
 	const controller = new AbortController();

@@ -8,7 +8,7 @@ import {
 	PermissionForwardingWatcher,
 	type ForwardedPermissionRequestEvent,
 	type ForwardedPermissionResolutionEvent,
-} from "./permission-forwarding-watcher.ts";
+} from "../src/permission-forwarding-watcher.ts";
 
 const PERMISSION_FORWARDING_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -137,6 +137,70 @@ test("permission forwarding watcher only emits valid current-session pending req
 		assert.equal(requests[0]?.source, "primary");
 		assert.equal(requests[0]?.requesterAgentName, "Delegate Alpha");
 		assert.equal(resolutions.length, 0);
+	} finally {
+		watcher.stop();
+		rmSync(rootDir, { recursive: true, force: true });
+	}
+});
+
+test("permission forwarding watcher caps parse failure counts and evicts removed corrupted files", () => {
+	const rootDir = createTempForwardingRoot();
+	const currentSessionId = "parent-session";
+	ensureSessionDirectories(rootDir, currentSessionId);
+	const corruptPath = join(requestsDirectory(rootDir, currentSessionId), "broken.json");
+	writeFileSync(corruptPath, "{", "utf-8");
+
+	const debugEvents: Array<Record<string, unknown> | undefined> = [];
+	const watcher = new PermissionForwardingWatcher({
+		permissionForwardingRootDir: rootDir,
+		onRequest: () => undefined,
+		onResolve: () => undefined,
+		debugLog: (_event, details) => {
+			debugEvents.push(details);
+		},
+	});
+	try {
+		const config = { enabled: true, watchLegacyPath: false, targetSessionId: currentSessionId };
+		for (let index = 0; index < 60; index += 1) {
+			watcher.start(config);
+		}
+
+		const parseFailureCountByFile = (watcher as unknown as { parseFailureCountByFile: Map<string, number> }).parseFailureCountByFile;
+		assert.equal(parseFailureCountByFile.get(corruptPath), 50);
+		assert.equal(debugEvents.some((details) => details?.attemptCount === 50), true);
+
+		unlinkSync(corruptPath);
+		watcher.start(config);
+		assert.equal(parseFailureCountByFile.has(corruptPath), false);
+	} finally {
+		watcher.stop();
+		rmSync(rootDir, { recursive: true, force: true });
+	}
+});
+
+test("permission forwarding watcher keeps interval fallback disabled when required fs watchers are active", () => {
+	const rootDir = createTempForwardingRoot();
+	const currentSessionId = "parent-session";
+	ensureSessionDirectories(rootDir, currentSessionId);
+
+	const { watcher } = createWatcherHarness(rootDir);
+	try {
+		watcher.start({ enabled: true, watchLegacyPath: false, targetSessionId: currentSessionId });
+		assert.equal((watcher as unknown as { fallbackScanTimer: NodeJS.Timeout | null }).fallbackScanTimer, null);
+	} finally {
+		watcher.stop();
+		rmSync(rootDir, { recursive: true, force: true });
+	}
+});
+
+test("permission forwarding watcher enables interval fallback while request directories cannot be watched", () => {
+	const rootDir = createTempForwardingRoot();
+	const currentSessionId = "parent-session";
+
+	const { watcher } = createWatcherHarness(rootDir);
+	try {
+		watcher.start({ enabled: true, watchLegacyPath: false, targetSessionId: currentSessionId });
+		assert.notEqual((watcher as unknown as { fallbackScanTimer: NodeJS.Timeout | null }).fallbackScanTimer, null);
 	} finally {
 		watcher.stop();
 		rmSync(rootDir, { recursive: true, force: true });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ReminderPlaybackController } from "./reminder-playback.ts";
+import { ReminderPlaybackController } from "../src/reminder-playback.ts";
 
 test("ReminderPlaybackController cancels only the matching reminder flow", () => {
 	const controller = new ReminderPlaybackController();
