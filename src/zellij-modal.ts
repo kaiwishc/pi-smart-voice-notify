@@ -1,4 +1,4 @@
-import { getSettingsListTheme, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
+import { getSettingsListTheme, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
 	Container,
@@ -8,7 +8,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	type SettingItem,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 const ANSI_RESET = "\x1b[0m";
 
