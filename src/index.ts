@@ -167,6 +167,14 @@ function formatAgentErrorNotification(reason: string | undefined): string {
 	return `❌ Agent ended with an error: ${normalizedReason.slice(0, 160)}`;
 }
 
+function hasPendingAgentMessages(ctx: ExtensionContext): boolean {
+	try {
+		return ctx.hasPendingMessages();
+	} catch {
+		return false;
+	}
+}
+
 function statusLine(config: VoiceNotifyConfig): string | undefined {
 	if (!config.enabled) {
 		return "voice:off";
@@ -1312,6 +1320,14 @@ export default function smartVoiceNotifyExtension(
 		if (!config.enabled || !config.enableErrorNotification) {
 			return;
 		}
+		if (hasPendingAgentMessages(ctx)) {
+			logger.debug("agent.error_notification.skipped", {
+				reason: "pending_messages",
+				errorReason: outcome.reason,
+				stage: "schedule",
+			});
+			return;
+		}
 
 		const timeoutId = setTimeout(() => {
 			if (pendingAgentErrorNotification !== timeoutId) {
@@ -1322,6 +1338,15 @@ export default function smartVoiceNotifyExtension(
 			if (shutdownRequested || !config.enabled || !config.enableErrorNotification) {
 				logger.debug("agent.error_notification.skipped", {
 					reason: shutdownRequested ? "session_shutdown" : "disabled",
+				});
+				return;
+			}
+
+			if (hasPendingAgentMessages(ctx)) {
+				logger.debug("agent.error_notification.skipped", {
+					reason: "pending_messages",
+					errorReason: outcome.reason,
+					stage: "fire",
 				});
 				return;
 			}

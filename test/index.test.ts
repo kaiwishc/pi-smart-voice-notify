@@ -10,6 +10,7 @@ import type { VoiceNotifyConfig } from "../src/types.ts";
 
 interface FakeContext {
 	hasUI: boolean;
+	hasPendingMessages?: () => boolean;
 }
 
 interface SpeakCall {
@@ -784,6 +785,76 @@ test("tool_result errors resolve permission flows without error notifications wh
 	await flushAsyncWork();
 
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+});
+
+test("agent_end error is suppressed when continuation messages are pending", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	let hasPendingMessages = true;
+	const { ctx, pi, ttsCalls } = createHarness({
+		enableErrorNotification: true,
+		reminderEnabled: false,
+	});
+	ctx.hasPendingMessages = () => hasPendingMessages;
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit(
+		"agent_end",
+		{
+			messages: [
+				{
+					role: "assistant",
+					stopReason: "error",
+					errorMessage: "bash tool failed; retry queued",
+				},
+			],
+		},
+		ctx,
+	);
+	await flushAsyncWork();
+	await tickAndFlush(10_000);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
+
+	hasPendingMessages = false;
+	await pi.emit("agent_start", {}, ctx);
+	await flushAsyncWork();
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
+});
+
+test("agent_end error still notifies when no continuation messages are pending", async (t) => {
+	disableFocusDetection(t);
+	useMockClock(t);
+
+	const { ctx, pi, ttsCalls } = createHarness({
+		enableErrorNotification: true,
+		reminderEnabled: false,
+	});
+	ctx.hasPendingMessages = () => false;
+
+	await pi.emit("session_start", {}, ctx);
+	await flushAsyncWork();
+	await pi.emit(
+		"agent_end",
+		{
+			messages: [
+				{
+					role: "assistant",
+					stopReason: "error",
+					errorMessage: "terminal failure",
+				},
+			],
+		},
+		ctx,
+	);
+	await flushAsyncWork();
+	await tickAndFlush(10_000);
+
+	const calls = immediateNotificationCalls(ttsCalls);
+	assert.equal(calls.length, 1);
+	assert.match(calls[0]?.text ?? "", /terminal failure/);
 });
 
 test("agent_end triggers an idle notification when idle notifications are enabled", async (t) => {
