@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1] - 2026-05-26
+
+### Changed
+- Suppressed error notifications when the agent has pending continuation messages.
+- Widened peer dependency ranges to `^0.74.0 || ^0.75.0`.
+- Aligned `@types/node` dev dependency to `25.9.1`.
+
 ## [0.5.0] - 2026-05-22
 
 ### Added
