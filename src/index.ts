@@ -6,7 +6,7 @@ import type {
 import type { SettingItem } from "@earendil-works/pi-tui";
 import { basename } from "node:path";
 
-import { initializeAIMessageService, type AIMessageConfig } from "./ai-messages.ts";
+import type { AIMessageConfig, AIMessageService } from "./ai-messages.ts";
 import {
 	BOOLEAN_VALUES,
 	clampInt,
@@ -30,25 +30,23 @@ import {
 	boolValue,
 	ensureDebugDirectory,
 } from "./config-store.ts";
-import { sendDesktopNotification } from "./desktop-notify.ts";
-import { clearFocusDetectCache, isTerminalFocused } from "./focus-detect.ts";
-import { detectLinuxSession, getIdleTime, wakeMonitor as wakeLinuxMonitor } from "./linux.ts";
+import type { FocusDetectOptions } from "./focus-detect.ts";
 import { createExtensionLogger, getErrorMessage } from "./logging.ts";
-import { AudioNotificationService } from "./notify-audio.ts";
-import { PermissionForwardingWatcher } from "./permission-forwarding-watcher.ts";
-import { clearProjectSoundCache } from "./per-project-sound.ts";
+import type { AudioNotificationService } from "./notify-audio.ts";
+import type {
+	PermissionForwardingWatcherConfig,
+	PermissionForwardingWatcherOptions,
+} from "./permission-forwarding-watcher.ts";
 import { ReminderPlaybackController } from "./reminder-playback.ts";
-import { SoundThemeService, type SoundThemeConfig } from "./sound-theme.ts";
-import { initializeTTSService } from "./tts.ts";
+import type { SoundThemeConfig, SoundThemeService } from "./sound-theme.ts";
 import type {
 	NotificationType,
 	NotifyLevel,
 	ReminderState,
 	VoiceNotifyConfig,
 } from "./types.ts";
-import type { TTSConfig, TTSService } from "./types/tts.ts";
-import { createWebhookService, type WebhookConfig } from "./webhook.ts";
-import { ZellijModal, ZellijSettingsModal } from "./zellij-modal.ts";
+import type { TTSConfig, TTSService, TTSServiceOptions } from "./types/tts.ts";
+import type { WebhookConfig, WebhookService } from "./webhook.ts";
 
 type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
 
@@ -280,15 +278,21 @@ const REMINDER_EVENT_TYPE: Record<NotificationType, string> = {
 };
 
 type ReminderKey = string;
-type PermissionForwardingWatcherController = Pick<PermissionForwardingWatcher, "start" | "updateConfig" | "stop">;
+type FocusDetector = (options?: FocusDetectOptions) => Promise<boolean>;
+
+type PermissionForwardingWatcherController = {
+	start(config: PermissionForwardingWatcherConfig): void;
+	updateConfig(config: PermissionForwardingWatcherConfig): void;
+	stop(): void;
+};
 
 export interface SmartVoiceNotifyDependencies {
 	readConfigFromDisk?: typeof readConfigFromDisk;
-	initializeTTSService?: (options?: Parameters<typeof initializeTTSService>[0]) => TTSService;
+	initializeTTSService?: (options?: TTSServiceOptions) => TTSService;
 	createPermissionForwardingWatcher?: (
-		options: ConstructorParameters<typeof PermissionForwardingWatcher>[0],
+		options: PermissionForwardingWatcherOptions,
 	) => PermissionForwardingWatcherController;
-	isTerminalFocused?: typeof isTerminalFocused;
+	isTerminalFocused?: FocusDetector;
 }
 
 function defaultReminderKey(type: NotificationType): ReminderKey {
@@ -375,12 +379,7 @@ export default function smartVoiceNotifyExtension(
 	dependencies: SmartVoiceNotifyDependencies = {},
 ): void {
 	const readConfig = dependencies.readConfigFromDisk ?? readConfigFromDisk;
-	const createTTSService = dependencies.initializeTTSService ?? initializeTTSService;
-	const createPermissionForwardingWatcher =
-		dependencies.createPermissionForwardingWatcher ??
-		((options: ConstructorParameters<typeof PermissionForwardingWatcher>[0]): PermissionForwardingWatcherController => {
-			return new PermissionForwardingWatcher(options);
-		});
+	const createInjectedTTSService = dependencies.initializeTTSService;
 	let config = readConfig();
 	let lastUserActivityAt = Date.now();
 	let hadErrorInTurn = false;
@@ -416,13 +415,16 @@ export default function smartVoiceNotifyExtension(
 		ensureDebugDirectory,
 	});
 
-	const audioService = new AudioNotificationService({
-		execRunner: pi,
-		getConfig: () => config,
-		debug: logger.debug,
-	});
+	let audioService: AudioNotificationService | null = null;
+	let ttsService: TTSService | null = null;
+	let aiMessageService: AIMessageService | null = null;
+	let webhookService: WebhookService | null = null;
+	let soundThemeService: SoundThemeService | null = null;
+	let permissionForwardingWatcher: PermissionForwardingWatcherController | null = null;
+	let focusModulePromise: Promise<typeof import("./focus-detect.ts")> | null = null;
+
 	const projectName = basename(process.cwd()) || "project";
-	const detectTerminalFocus = dependencies.isTerminalFocused ?? isTerminalFocused;
+	const injectedTerminalFocusDetector = dependencies.isTerminalFocused;
 	const focusDetectionEnabled = envBoolean(
 		process.platform === "linux" || process.platform === "win32",
 		"PI_SMART_NOTIFY_FOCUS_DETECTION",
@@ -433,11 +435,6 @@ export default function smartVoiceNotifyExtension(
 		0,
 		envInteger(10_000, "PI_SMART_NOTIFY_AGENT_ERROR_GRACE_MS"),
 	);
-	const soundThemeService = new SoundThemeService({
-		debugLog: (message) => {
-			logger.debug("sound_theme.debug", { message });
-		},
-	});
 	const buildTTSServiceConfig = (): TTSConfig => {
 		return {
 			enableTts: config.enableTts,
@@ -541,26 +538,96 @@ export default function smartVoiceNotifyExtension(
 			customSoundDirectories: configuredCustomSoundDirectories.length > 0 ? configuredCustomSoundDirectories : undefined,
 		};
 	};
-	let ttsService = createTTSService({
-		execRunner: pi,
-		config: buildTTSServiceConfig(),
-		debug: logger.debug,
-	});
-	const aiMessageService = initializeAIMessageService({
-		config: buildAIMessageConfig(),
-		debugLog: (message, details = {}) => {
-			logger.debug(`ai_messages.${message}`, details);
-		},
-	});
-	const webhookService = createWebhookService(buildWebhookConfig());
-	const linuxSession = detectLinuxSession();
-	logger.debug("linux.session.detected", {
-		sessionType: linuxSession.sessionType,
-		display: linuxSession.display,
-		waylandDisplay: linuxSession.waylandDisplay,
-	});
+	const getAudioService = async (): Promise<AudioNotificationService> => {
+		if (!audioService) {
+			const { AudioNotificationService: AudioNotificationServiceCtor } = await import("./notify-audio.ts");
+			audioService = new AudioNotificationServiceCtor({
+				execRunner: pi,
+				getConfig: () => config,
+				debug: logger.debug,
+			});
+		}
+		return audioService;
+	};
 
-	const permissionForwardingWatcher = createPermissionForwardingWatcher({
+	const getTTSService = async (): Promise<TTSService> => {
+		if (!ttsService) {
+			const createTTSService = createInjectedTTSService
+				?? (await import("./tts.ts")).initializeTTSService;
+			ttsService = createTTSService({
+				execRunner: pi,
+				config: buildTTSServiceConfig(),
+				debug: logger.debug,
+			});
+		}
+		return ttsService;
+	};
+
+	const getAIMessageService = async (): Promise<AIMessageService> => {
+		if (!aiMessageService) {
+			const { initializeAIMessageService } = await import("./ai-messages.ts");
+			aiMessageService = initializeAIMessageService({
+				config: buildAIMessageConfig(),
+				debugLog: (message, details = {}) => {
+					logger.debug(`ai_messages.${message}`, details);
+				},
+			});
+		}
+		return aiMessageService;
+	};
+
+	const getWebhookService = async (): Promise<WebhookService> => {
+		if (!webhookService) {
+			const { createWebhookService } = await import("./webhook.ts");
+			webhookService = createWebhookService(buildWebhookConfig());
+		}
+		return webhookService;
+	};
+
+	const getSoundThemeService = async (): Promise<SoundThemeService> => {
+		if (!soundThemeService) {
+			const { SoundThemeService: SoundThemeServiceCtor } = await import("./sound-theme.ts");
+			soundThemeService = new SoundThemeServiceCtor({
+				debugLog: (message) => {
+					logger.debug("sound_theme.debug", { message });
+				},
+			});
+		}
+		return soundThemeService;
+	};
+
+	const getTerminalFocusDetector = async (): Promise<FocusDetector> => {
+		if (injectedTerminalFocusDetector) {
+			return injectedTerminalFocusDetector;
+		}
+		focusModulePromise ??= import("./focus-detect.ts");
+		const module = await focusModulePromise;
+		return module.isTerminalFocused;
+	};
+
+	const clearFocusDetectCacheIfLoaded = (): void => {
+		if (!focusModulePromise) {
+			return;
+		}
+		void focusModulePromise
+			.then((module) => module.clearFocusDetectCache())
+			.catch((error) => {
+				logger.debug("focus.cache_clear_failed", { error: getErrorMessage(error) });
+			});
+	};
+
+	const clearProjectSoundCacheIfLoaded = (): void => {
+		if (!soundThemeService) {
+			return;
+		}
+		void import("./per-project-sound.ts")
+			.then((module) => module.clearProjectSoundCache())
+			.catch((error) => {
+				logger.debug("sound_theme.cache_clear_failed", { error: getErrorMessage(error) });
+			});
+	};
+
+	const permissionForwardingWatcherOptions: PermissionForwardingWatcherOptions = {
 		onRequest: (event) => {
 			if (!config.enabled || !config.enablePermissionNotification || !config.enableForwardedPermissionWatcher) {
 				return;
@@ -617,28 +684,52 @@ export default function smartVoiceNotifyExtension(
 		debugLog: (event, details = {}) => {
 			logger.debug(event, details);
 		},
-	});
+	};
 
-	const syncPermissionForwardingWatcher = (): void => {
+	if (dependencies.createPermissionForwardingWatcher) {
+		permissionForwardingWatcher = dependencies.createPermissionForwardingWatcher(permissionForwardingWatcherOptions);
+	}
+
+	const getPermissionForwardingWatcher = async (): Promise<PermissionForwardingWatcherController> => {
+		if (!permissionForwardingWatcher) {
+			const { PermissionForwardingWatcher } = await import("./permission-forwarding-watcher.ts");
+			permissionForwardingWatcher = new PermissionForwardingWatcher(permissionForwardingWatcherOptions);
+		}
+		return permissionForwardingWatcher;
+	};
+
+	const syncPermissionForwardingWatcher = async (): Promise<void> => {
 		if (!activeSessionContext) {
-			permissionForwardingWatcher.stop();
+			permissionForwardingWatcher?.stop();
 			return;
 		}
-		permissionForwardingWatcher.start({
+
+		const watcherConfig: PermissionForwardingWatcherConfig = {
 			enabled: config.enabled && config.enablePermissionNotification && config.enableForwardedPermissionWatcher,
 			watchLegacyPath: config.watchLegacyForwardedPermissionPath,
 			targetSessionId: getPermissionForwardingSessionId(activeSessionContext),
-		});
+		};
+
+		if (!watcherConfig.enabled && !permissionForwardingWatcher) {
+			return;
+		}
+
+		const watcher = watcherConfig.enabled
+			? await getPermissionForwardingWatcher()
+			: permissionForwardingWatcher;
+		watcher?.start(watcherConfig);
 	};
 
 	const refreshIntegratedServiceConfig = (): void => {
-		ttsService = createTTSService({
-			execRunner: pi,
-			config: buildTTSServiceConfig(),
-			debug: logger.debug,
-		});
-		aiMessageService.updateConfig(buildAIMessageConfig());
-		webhookService.updateConfig(buildWebhookConfig());
+		ttsService = createInjectedTTSService
+			? createInjectedTTSService({
+				execRunner: pi,
+				config: buildTTSServiceConfig(),
+				debug: logger.debug,
+			})
+			: null;
+		aiMessageService?.updateConfig(buildAIMessageConfig());
+		webhookService?.updateConfig(buildWebhookConfig());
 	};
 
 	const rememberScopedToolCallId = (toolCallId: string, seenToolCallIds: Set<string>): boolean => {
@@ -797,6 +888,7 @@ export default function smartVoiceNotifyExtension(
 		}
 
 		try {
+			const detectTerminalFocus = await getTerminalFocusDetector();
 			const focused = await detectTerminalFocus({
 				debug: config.debugLog,
 				cacheTtlMs: config.focusCacheTtlMs,
@@ -836,22 +928,25 @@ export default function smartVoiceNotifyExtension(
 		}
 
 		const eventType = options.isReminder ? REMINDER_EVENT_TYPE[type] : type;
-		try {
-			const generated = await aiMessageService.generateMessage(eventType, {
-				projectName,
-				time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-				count: options.followUpCount,
-				reason: options.reason,
-			});
-			if (generated.trim().length > 0) {
-				return generated;
+		if (config.aiMessages.enabled) {
+			try {
+				const service = await getAIMessageService();
+				const generated = await service.generateMessage(eventType, {
+					projectName,
+					time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+					count: options.followUpCount,
+					reason: options.reason,
+				});
+				if (generated.trim().length > 0) {
+					return generated;
+				}
+			} catch (error) {
+				logger.debug("message.generate.error", {
+					type,
+					eventType,
+					error: getErrorMessage(error),
+				});
 			}
-		} catch (error) {
-			logger.debug("message.generate.error", {
-				type,
-				eventType,
-				error: getErrorMessage(error),
-			});
 		}
 
 		return pickRandom(MESSAGE_LIBRARY[type][options.isReminder ? "reminder" : "initial"]);
@@ -863,6 +958,7 @@ export default function smartVoiceNotifyExtension(
 		}
 
 		if (process.platform === "linux") {
+			const { getIdleTime, wakeMonitor: wakeLinuxMonitor } = await import("./linux.ts");
 			const idleSeconds = await getIdleTime({
 				debugLog: (message) => {
 					logger.debug("linux.idle", { message });
@@ -884,7 +980,8 @@ export default function smartVoiceNotifyExtension(
 			return;
 		}
 
-		await audioService.wakeMonitor();
+		const service = await getAudioService();
+		await service.wakeMonitor();
 	};
 
 	const playNotificationSound = async (type: NotificationType): Promise<boolean> => {
@@ -894,7 +991,8 @@ export default function smartVoiceNotifyExtension(
 
 		if (process.platform === "linux") {
 			try {
-				const played = await soundThemeService.playEventSound(type, buildSoundThemeConfig(), SOUND_LOOPS[type]);
+				const service = await getSoundThemeService();
+				const played = await service.playEventSound(type, buildSoundThemeConfig(), SOUND_LOOPS[type]);
 				if (played) {
 					return true;
 				}
@@ -907,7 +1005,8 @@ export default function smartVoiceNotifyExtension(
 		}
 
 		try {
-			await audioService.playWindowsSound(type);
+			const service = await getAudioService();
+			await service.playWindowsSound(type);
 			return isWindows();
 		} catch (error) {
 			logger.debug("sound.play.legacy_failed", {
@@ -923,7 +1022,8 @@ export default function smartVoiceNotifyExtension(
 			return false;
 		}
 
-		const spoken = await ttsService.speak(message, config.ttsEngine, {
+		const service = await getTTSService();
+		const spoken = await service.speak(message, config.ttsEngine, {
 			signal,
 			sapiVoice: config.sapiVoice,
 			sapiRate: config.sapiRate,
@@ -934,7 +1034,8 @@ export default function smartVoiceNotifyExtension(
 
 		if (isWindows()) {
 			try {
-				await audioService.speakWithSapi(message, signal);
+				const audio = await getAudioService();
+				await audio.speakWithSapi(message, signal);
 				return !signal?.aborted;
 			} catch (error) {
 				logger.debug("tts.sapi_fallback_failed", {
@@ -952,6 +1053,7 @@ export default function smartVoiceNotifyExtension(
 		}
 
 		try {
+			const { sendDesktopNotification } = await import("./desktop-notify.ts");
 			const result = await sendDesktopNotification({
 				type,
 				message,
@@ -985,9 +1087,14 @@ export default function smartVoiceNotifyExtension(
 		}
 	};
 
-	const dispatchWebhook = (type: NotificationType, message: string): void => {
+	const dispatchWebhook = async (type: NotificationType, message: string): Promise<void> => {
+		if (!config.webhook.enabled) {
+			return;
+		}
+
 		try {
-			const dispatchResult = webhookService.dispatch({
+			const service = await getWebhookService();
+			const dispatchResult = service.dispatch({
 				type,
 				title: `Pi Notification - ${type}`,
 				message,
@@ -1294,7 +1401,7 @@ export default function smartVoiceNotifyExtension(
 					}
 
 					if (!shutdownRequested) {
-						dispatchWebhook(type, spokenMessage);
+						await dispatchWebhook(type, spokenMessage);
 					}
 				});
 				if (!shutdownRequested && options.scheduleReminder !== false) {
@@ -1619,6 +1726,7 @@ export default function smartVoiceNotifyExtension(
 		const overlayOptions = { anchor: "center" as const, width: 92, maxHeight: "85%" as const, margin: 1 };
 		const advancedConfigPath = CONFIG_PATH;
 		const description = `Recommended settings only.\nFor advanced settings, manually edit: ${advancedConfigPath}`;
+		const { ZellijModal, ZellijSettingsModal } = await import("./zellij-modal.ts");
 
 		await ctx.ui.custom<void>(
 			(tui, theme, _keybindings, done) => {
@@ -1632,7 +1740,7 @@ export default function smartVoiceNotifyExtension(
 							applySetting(draft, id, newValue);
 							config = normalizeConfig(draft);
 							refreshIntegratedServiceConfig();
-							syncPermissionForwardingWatcher();
+							void syncPermissionForwardingWatcher();
 							if (config.debugLog && !previousConfig.debugLog) {
 								logger.debug("debug.enabled", { debugLogPath: DEBUG_LOG_PATH });
 							}
@@ -1708,7 +1816,7 @@ export default function smartVoiceNotifyExtension(
 		if (subcommand === "reload") {
 			config = readConfig();
 			refreshIntegratedServiceConfig();
-			syncPermissionForwardingWatcher();
+			await syncPermissionForwardingWatcher();
 			refreshQuestionToolAvailability();
 			cancelReminderActivity("command_reload");
 			updateStatus(ctx);
@@ -1719,7 +1827,7 @@ export default function smartVoiceNotifyExtension(
 		if (subcommand === "on" || subcommand === "off") {
 			config.enabled = subcommand === "on";
 			refreshIntegratedServiceConfig();
-			syncPermissionForwardingWatcher();
+			await syncPermissionForwardingWatcher();
 			persistConfig(ctx);
 			if (!config.enabled) {
 				cancelReminderActivity("command_disabled");
@@ -1759,9 +1867,9 @@ export default function smartVoiceNotifyExtension(
 	pi.on("resources_discover", (event, _ctx) => {
 		if (event.reason === "reload") {
 			// Clear caches on reload
-			clearFocusDetectCache();
-			clearProjectSoundCache();
-			aiMessageService.clearCache();
+			clearFocusDetectCacheIfLoaded();
+			clearProjectSoundCacheIfLoaded();
+			aiMessageService?.clearCache();
 		}
 	});
 
@@ -1775,14 +1883,14 @@ export default function smartVoiceNotifyExtension(
 		config = readConfig();
 		refreshIntegratedServiceConfig();
 		activeSessionContext = ctx;
-		syncPermissionForwardingWatcher();
+		await syncPermissionForwardingWatcher();
 		refreshQuestionToolAvailability();
-		clearFocusDetectCache();
-		clearProjectSoundCache();
+		clearFocusDetectCacheIfLoaded();
+		clearProjectSoundCacheIfLoaded();
 
 		// Clear AI message cache on reload to pick up config changes
 		if (reason === "reload") {
-			aiMessageService.clearCache();
+			aiMessageService?.clearCache();
 		}
 		lastUserActivityAt = Date.now();
 		hadErrorInTurn = false;
@@ -1829,17 +1937,17 @@ export default function smartVoiceNotifyExtension(
 		shutdownPromise = (async () => {
 			logger.debug("session.shutdown", {});
 			activeSessionContext = null;
-			permissionForwardingWatcher.stop();
+			permissionForwardingWatcher?.stop();
 			pendingPermissionToolCallIds.clear();
 			processedToolResultToolCallIds.clear();
 			resetPermissionBatch("session_shutdown");
 			cancelReminderActivity("session_shutdown");
-			clearFocusDetectCache();
-			clearProjectSoundCache();
+			clearFocusDetectCacheIfLoaded();
+			clearProjectSoundCacheIfLoaded();
 			try {
 				// Forward abort signal to flush if available (added in pi-coding-agent 0.67.x)
 				const abortSignal = 'signal' in ctx ? (ctx as { signal?: AbortSignal }).signal : undefined;
-				await webhookService.flush(abortSignal);
+				await webhookService?.flush(abortSignal);
 			} catch (error) {
 				const message = `Failed to flush webhook queue during shutdown: ${getErrorMessage(error)}`;
 				logger.error(new Error(message));
