@@ -991,7 +991,10 @@ export function readConfigFromDisk(): VoiceNotifyConfig {
 		const parsed = JSON.parse(raw) as unknown;
 		const normalized = normalizeConfig(parsed);
 		const validation = validateConfig(normalized);
-		writeFileSync(CONFIG_PATH, `${JSON.stringify(validation.config, null, 2)}\n`, "utf-8");
+		const serialized = `${JSON.stringify(validation.config, null, 2)}\n`;
+		if (raw !== serialized) {
+			writeFileSync(CONFIG_PATH, serialized, "utf-8");
+		}
 		const runtimeConfig = applyEnvironmentOverrides(validation.config);
 		return validateConfig(runtimeConfig).config;
 	} catch {
