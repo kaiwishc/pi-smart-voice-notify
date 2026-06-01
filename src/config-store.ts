@@ -1,7 +1,7 @@
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
+import { resolvePiAgentDir } from "./agent-dir.ts";
 import type {
 	ConcreteTTSEngine,
 	MessageSet,
@@ -14,7 +14,7 @@ import type {
 
 export const EXTENSION_ID = "pi-smart-voice-notify";
 export const STATUS_KEY = "smart-voice-notify";
-export const CONFIG_DIR = join(getAgentDir(), "extensions", EXTENSION_ID);
+export const CONFIG_DIR = join(resolvePiAgentDir(), "extensions", EXTENSION_ID);
 export const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 export const DEBUG_DIR = join(CONFIG_DIR, "debug");
 export const DEBUG_LOG_PATH = join(DEBUG_DIR, `${EXTENSION_ID}.log`);

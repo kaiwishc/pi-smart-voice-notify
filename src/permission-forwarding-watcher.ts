@@ -1,14 +1,14 @@
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 
+import { resolvePiAgentDir } from "./agent-dir.ts";
 import { toRecord } from "./config-store.ts";
 import { getErrorMessage } from "./logging.ts";
 
 export type PermissionForwardingSource = "primary" | "legacy";
 export type ForwardedPermissionResolutionReason = "request_removed" | "watch_disabled" | "watcher_stopped";
 
-const AGENT_DIR = getAgentDir();
+const AGENT_DIR = resolvePiAgentDir();
 const PERMISSION_FORWARDING_ROOT_DIR = join(AGENT_DIR, "sessions", "permission-forwarding");
 const SESSION_FORWARDING_ROOT_DIRECTORY_NAME = "sessions";
 const SESSION_FORWARDING_REQUESTS_DIRECTORY_NAME = "requests";
@@ -60,7 +60,7 @@ export interface PermissionForwardingWatcherConfig {
 	targetSessionId?: string | null;
 }
 
-interface PermissionForwardingWatcherOptions {
+export interface PermissionForwardingWatcherOptions {
 	onRequest: (event: ForwardedPermissionRequestEvent) => void;
 	onResolve: (event: ForwardedPermissionResolutionEvent) => void;
 	debugLog: (event: string, details?: Record<string, unknown>) => void;
