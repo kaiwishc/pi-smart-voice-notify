@@ -237,6 +237,10 @@ function sanitizeMessage(message: string, maxLength = DEFAULT_MAX_MESSAGE_LENGTH
 	return `${clipped.slice(0, safeBoundary).trimEnd()}...`;
 }
 
+function getUsableTemplates(templates: string[]): string[] {
+	return templates.filter((template) => template.trim().length > 0);
+}
+
 function pickTemplate(templates: string[]): string {
 	const index = Math.floor(Math.random() * templates.length);
 	return templates[index] ?? templates[0] ?? "Notification";
@@ -252,8 +256,11 @@ function getTemplatesForEvent(eventType: string, config: AIMessageConfig): strin
 	}
 
 	const overrideTemplates = config.templates[eventType];
-	if (Array.isArray(overrideTemplates) && overrideTemplates.length > 0) {
-		return overrideTemplates;
+	if (Array.isArray(overrideTemplates)) {
+		const usableTemplates = getUsableTemplates(overrideTemplates);
+		if (usableTemplates.length > 0) {
+			return usableTemplates;
+		}
 	}
 	return DEFAULT_TEMPLATES[eventType];
 }
@@ -317,8 +324,20 @@ export class AIMessageService {
 		const templates = getTemplatesForEvent(eventType, this.config);
 		const template = pickTemplate(templates);
 		const variables = buildTemplateVariables(eventType, context);
-		const message = applyTemplateVariables(template, variables);
-		return sanitizeMessage(message);
+		const message = sanitizeMessage(applyTemplateVariables(template, variables));
+		if (message.length > 0) {
+			return message;
+		}
+
+		if (isCoreEventType(eventType)) {
+			const fallbackTemplate = pickTemplate(DEFAULT_TEMPLATES[eventType]);
+			const fallbackMessage = sanitizeMessage(applyTemplateVariables(fallbackTemplate, variables));
+			if (fallbackMessage.length > 0) {
+				return fallbackMessage;
+			}
+		}
+
+		return "Notification: Please check the terminal.";
 	}
 
 	public async generateAIMessage(eventType: string, context: AIMessageContext = {}): Promise<string | null> {
