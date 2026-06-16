@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.5.3] - 2026-06-16
+
+### Fixed
+- Filtered blank template entries so whitespace-only overrides no longer produce empty notification messages.
+- Added a final fallback (`"Notification: Please check the terminal."`) when all template expansions and defaults yield empty output.
+
 ## [0.5.2] - 2026-06-01
 
 ### Changed
