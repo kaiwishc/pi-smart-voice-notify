@@ -1,6 +1,6 @@
 {
   "name": "pi-smart-voice-notify",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Windows-optimized smart voice, sound, and desktop notifications for Pi coding agent.",
   "type": "module",
   "main": "./index.ts",
@@ -61,14 +61,14 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.0 || ^0.75.0 || ^0.77.0 || ^0.78.0",
-    "@earendil-works/pi-tui": "^0.74.0 || ^0.75.0 || ^0.77.0 || ^0.78.0"
+    "@earendil-works/pi-coding-agent": "^0.74.0 || ^0.75.0 || ^0.77.0 || ^0.78.0 || ^0.79.0",
+    "@earendil-works/pi-tui": "^0.74.0 || ^0.75.0 || ^0.77.0 || ^0.78.0 || ^0.79.0"
   },
   "dependencies": {
     "node-notifier": "^10.0.1",
-    "undici": "^8.3.0"
+    "undici": "^8.5.0"
   },
   "devDependencies": {
-    "@types/node": "25.9.1"
+    "@types/node": "25.9.3"
   }
 }
