@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-06-22
+
+### Fixed
+- Added a command allowlist to `runAbortableCommand` so non-allowlisted executables are rejected before spawning, preventing arbitrary command injection.
+- Replaced dynamic string-based command spawning in Linux helpers with a typed `LinuxCommandName` union and dedicated `spawnLinuxCommand` switch.
+
+### Changed
+- Added `postinstall` hook that runs `patch-vulnerable-deps.mjs` when installed under `.pi/agent/extensions/`.
+- Pinned `protobufjs` 7.6.3, `ws` 8.21.0, and `uuid` 11.1.1 via npm `overrides` to resolve known vulnerabilities.
+- Added `@earendil-works/pi-coding-agent` as a devDependency for type-checking.
+- Updated README badge styling to for-the-badge, added platform badge and ko-fi support button.
+- Added `config-store-env-override` test to the test script.
+
 ## [0.5.3] - 2026-06-16
 
 ### Fixed
