@@ -8,8 +8,10 @@ import {
 } from "../src/config-store.ts";
 
 test("resolveProjectConfigPath points at <repo>/.pi/extensions/<id>/config.json", () => {
+	// Normalize path separators so the assertion is portable across POSIX and Windows;
+	// path.join yields backslashes on Windows, which fs APIs accept transparently.
 	assert.equal(
-		resolveProjectConfigPath("/repo"),
+		resolveProjectConfigPath("/repo").replace(/\\/g, "/"),
 		"/repo/.pi/extensions/pi-smart-voice-notify/config.json",
 	);
 });

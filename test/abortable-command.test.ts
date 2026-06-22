@@ -3,6 +3,13 @@ import test from "node:test";
 
 import { runAbortableCommand } from "../src/abortable-command.ts";
 
+test("runAbortableCommand rejects non-allowlisted commands before spawning", async () => {
+	await assert.rejects(
+		runAbortableCommand("curl;whoami", ["https://example.com"], { timeoutMs: 1_000 }),
+		/command is not allowlisted/i,
+	);
+});
+
 test("runAbortableCommand returns an aborted result when the signal is already aborted", async () => {
 	const controller = new AbortController();
 	controller.abort();
