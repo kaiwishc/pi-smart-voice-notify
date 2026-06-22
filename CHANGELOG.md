@@ -5,15 +5,15 @@
 ## [0.5.4] - 2026-06-22
 
 ### Fixed
-- Added a command allowlist to `runAbortableCommand` so non-allowlisted executables are rejected before spawning, preventing arbitrary command injection.
-- Replaced dynamic string-based command spawning in Linux helpers with a typed `LinuxCommandName` union and dedicated `spawnLinuxCommand` switch.
+- Added a command allowlist to `runAbortableCommand` so non-allowlisted executables are rejected before spawning, preventing arbitrary command injection ([2074e30](https://github.com/MasuRii/pi-smart-voice-notify/commit/2074e30)).
+- Replaced dynamic string-based command spawning in Linux helpers with a typed `LinuxCommandName` union and dedicated `spawnLinuxCommand` switch ([2074e30](https://github.com/MasuRii/pi-smart-voice-notify/commit/2074e30)).
 
 ### Changed
-- Added `postinstall` hook that runs `patch-vulnerable-deps.mjs` when installed under `.pi/agent/extensions/`.
-- Pinned `protobufjs` 7.6.3, `ws` 8.21.0, and `uuid` 11.1.1 via npm `overrides` to resolve known vulnerabilities.
-- Added `@earendil-works/pi-coding-agent` as a devDependency for type-checking.
-- Updated README badge styling to for-the-badge, added platform badge and ko-fi support button.
-- Added `config-store-env-override` test to the test script.
+- Added `postinstall` hook that runs `patch-vulnerable-deps.mjs` when installed under `.pi/agent/extensions/` ([924e585](https://github.com/MasuRii/pi-smart-voice-notify/commit/924e585)).
+- Pinned `protobufjs` 7.6.3, `ws` 8.21.0, and `uuid` 11.1.1 via npm `overrides` to resolve known vulnerabilities ([924e585](https://github.com/MasuRii/pi-smart-voice-notify/commit/924e585)).
+- Added `@earendil-works/pi-coding-agent` as a devDependency for type-checking ([924e585](https://github.com/MasuRii/pi-smart-voice-notify/commit/924e585)).
+- Updated README badge styling to for-the-badge, added platform badge and ko-fi support button ([f66fff6](https://github.com/MasuRii/pi-smart-voice-notify/commit/f66fff6)).
+- Added `config-store-env-override` test to the test script ([924e585](https://github.com/MasuRii/pi-smart-voice-notify/commit/924e585)).
 
 ## [0.5.3] - 2026-06-16
 
