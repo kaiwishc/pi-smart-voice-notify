@@ -1,4 +1,31 @@
 import { spawn } from "node:child_process";
+import { basename } from "node:path";
+
+const ALLOWED_ABORTABLE_COMMANDS = new Set([
+	"aplay",
+	"edge-tts",
+	"espeak-ng",
+	"ffplay",
+	"gdbus",
+	"paplay",
+	"powershell",
+	"powershell.exe",
+	"swaymsg",
+	"where",
+	"which",
+	"xdotool",
+	"xprop",
+]);
+
+function normalizeCommandName(command: string): string {
+	return basename(command).trim().toLowerCase();
+}
+
+function isAllowedAbortableCommand(command: string): boolean {
+	const normalized = normalizeCommandName(command);
+	const nodeExecutable = normalizeCommandName(process.execPath);
+	return normalized === nodeExecutable || ALLOWED_ABORTABLE_COMMANDS.has(normalized);
+}
 
 export interface AbortableCommandOptions {
 	timeoutMs?: number;
@@ -55,6 +82,9 @@ export async function runAbortableCommand(
 	if (!Array.isArray(args)) {
 		throw new Error("runAbortableCommand: args must be an array of strings");
 	}
+	if (!isAllowedAbortableCommand(normalizedCommand)) {
+		throw new Error(`runAbortableCommand: command is not allowlisted: ${normalizedCommand}`);
+	}
 
 	const commandLabel = buildCommandString(normalizedCommand, args);
 	if (options.signal?.aborted) {
@@ -69,7 +99,7 @@ export async function runAbortableCommand(
 	}
 
 	return await new Promise<AbortableCommandResult>((resolve) => {
-		const child = spawn(normalizedCommand, [...args], {
+		const child = spawn(normalizedCommand, [...args], { // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- normalizedCommand is checked against ALLOWED_ABORTABLE_COMMANDS (plus the current Node executable for tests) before spawn; args are passed as an array with shell disabled.
 			env: options.env ?? process.env,
 			cwd: options.cwd,
 		});

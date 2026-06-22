@@ -11,6 +11,7 @@ import type {
 const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_AUDIO_TIMEOUT_MS = 20_000;
 type DebugLog = (message: string) => void;
+type LinuxCommandName = "xset" | "gdbus" | "pactl" | "amixer" | "paplay" | "aplay" | "xprintidle";
 
 function createDebugLog(options?: LinuxUtilsOptions): DebugLog {
 	return options?.debugLog ?? (() => {});
@@ -23,13 +24,32 @@ function buildCommandString(command: string, args: string[]): string {
 	return `${command} ${args.join(" ")}`;
 }
 
+function spawnLinuxCommand(command: LinuxCommandName, args: string[]) {
+	switch (command) {
+		case "xset":
+			return spawn("xset", args, { env: process.env });
+		case "gdbus":
+			return spawn("gdbus", args, { env: process.env });
+		case "pactl":
+			return spawn("pactl", args, { env: process.env });
+		case "amixer":
+			return spawn("amixer", args, { env: process.env });
+		case "paplay":
+			return spawn("paplay", args, { env: process.env });
+		case "aplay":
+			return spawn("aplay", args, { env: process.env });
+		case "xprintidle":
+			return spawn("xprintidle", args, { env: process.env });
+	}
+}
+
 async function runSpawnCommand(
-	command: string,
+	command: LinuxCommandName,
 	args: string[],
 	timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<LinuxCommandResult> {
 	return await new Promise<LinuxCommandResult>((resolve) => {
-		const child = spawn(command, args, { env: process.env });
+		const child = spawnLinuxCommand(command, args);
 		const fullCommand = buildCommandString(command, args);
 		let stdout = "";
 		let stderr = "";
@@ -139,7 +159,7 @@ export async function wakeMonitor(options: LinuxUtilsOptions = {}): Promise<bool
 	}
 
 	const session = detectLinuxSession();
-	const wakeCommands = [
+	const wakeCommands: Array<{ name: string; command: LinuxCommandName; args: string[] }> = [
 		{
 			name: "xset",
 			command: "xset",
