@@ -1,13 +1,18 @@
-# 🔔 pi-smart-voice-notify
+<div align="center">
 
-[![npm version](https://img.shields.io/npm/v/pi-smart-voice-notify?style=flat-square)](https://www.npmjs.com/package/pi-smart-voice-notify) [![License](https://img.shields.io/github/license/MasuRii/pi-smart-voice-notify?style=flat-square)](LICENSE)
+# pi-smart-voice-notify
+
+[![npm version](https://img.shields.io/npm/v/pi-smart-voice-notify?style=for-the-badge)](https://www.npmjs.com/package/pi-smart-voice-notify)
+[![License](https://img.shields.io/github/license/MasuRii/pi-smart-voice-notify?style=for-the-badge)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=for-the-badge)]()
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Y8Y01PSSVR)
 
 Windows-optimized smart notification extension for the Pi coding agent.
-
 **pi-smart-voice-notify** monitors Pi session and tool events to alert you via **multi-engine TTS**, **sound playback**, **desktop toast notifications**, and optional **webhook/AI-assisted messaging** when the agent requires your attention.
-
 <img width="1360" height="752" alt="image" src="https://github.com/user-attachments/assets/c215a7fe-31b4-4bc4-a89e-992a4847819d" />
 
+</div>
 
 ## Features
 
@@ -303,4 +308,4 @@ npm run check      # build + test
 
 ## License
 
-MIT
+[MIT](LICENSE)
