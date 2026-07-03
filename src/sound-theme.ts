@@ -14,10 +14,15 @@ import {
 	resolveProjectSoundContext,
 	uniquePaths,
 } from "./per-project-sound.ts";
+import { loadManifestRecord, emptySoundsByCategory } from "./shared/index.ts";
 
 export const SOUND_CATEGORIES = ["notification", "alert", "success", "error", "reminder"] as const;
 
 export type SoundCategory = (typeof SOUND_CATEGORIES)[number];
+
+type CategorySoundMap = Partial<Record<SoundCategory, string>>;
+type CategoryVolumeMap = Partial<Record<SoundCategory, number>>;
+type FileVolumeMap = Record<string, number>;
 
 export interface SoundThemeConfig {
 	themeName?: string;
@@ -28,24 +33,24 @@ export interface SoundThemeConfig {
 	enablePerProjectSounds?: boolean;
 	randomizeSounds?: boolean;
 	defaultVolume?: number;
-	soundFiles?: Partial<Record<SoundCategory, string>>;
-	volumeByCategory?: Partial<Record<SoundCategory, number>>;
-	volumeByFile?: Record<string, number>;
+	soundFiles?: CategorySoundMap;
+	volumeByCategory?: CategoryVolumeMap;
+	volumeByFile?: FileVolumeMap;
 	customSoundDirectories?: string[];
 	themeOverride?: {
 		themeName?: string;
 		themeDirectory?: string;
-		soundFiles?: Partial<Record<SoundCategory, string>>;
-		volumeByCategory?: Partial<Record<SoundCategory, number>>;
-		volumeByFile?: Record<string, number>;
+		soundFiles?: CategorySoundMap;
+		volumeByCategory?: CategoryVolumeMap;
+		volumeByFile?: FileVolumeMap;
 		randomizeSounds?: boolean;
 	};
 }
 
 interface ThemeManifest {
 	sounds?: Partial<Record<SoundCategory, string | string[]>>;
-	volumeByCategory?: Partial<Record<SoundCategory, number>>;
-	volumeByFile?: Record<string, number>;
+	volumeByCategory?: CategoryVolumeMap;
+	volumeByFile?: FileVolumeMap;
 	randomizeSounds?: boolean;
 }
 
@@ -146,25 +151,10 @@ function pickSound(candidates: string[], randomize: boolean): string[] {
 	return selected ? [selected, ...rest] : [...candidates];
 }
 
-async function loadManifest(themeDirectory: string): Promise<ThemeManifest | null> {
-	const manifestCandidates = ["theme.json", "sound-theme.json"].map((fileName) => join(themeDirectory, fileName));
-
-	for (const manifestPath of manifestCandidates) {
-		if (!(await isReadable(manifestPath))) {
-			continue;
-		}
-		try {
-			const content = await readFile(manifestPath, "utf-8");
-			const parsed = JSON.parse(content) as unknown;
-			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-				return parsed as ThemeManifest;
-			}
-		} catch {
-			return null;
-		}
-	}
-
-	return null;
+async function loadThemeManifest(themeDirectory: string): Promise<ThemeManifest | null> {
+	const manifestCandidates = ["theme.json", "sound-theme.json"];
+	const record = await loadManifestRecord(themeDirectory, manifestCandidates);
+	return record as ThemeManifest | null;
 }
 
 async function loadConfigFromFile(configPath: string | undefined): Promise<SoundThemeConfig> {
@@ -268,7 +258,7 @@ async function resolveThemeDirectories(config: SoundThemeConfig, assetsDirectory
 	return existingDirectories;
 }
 
-async function resolveVolumeByFile(
+async function resolveThemeVolumeByFile(
 	volumeByFile: Record<string, number>,
 	searchDirectories: string[],
 ): Promise<Record<string, number>> {
@@ -324,15 +314,9 @@ export class SoundThemeService {
 				(directory) => directory !== this.assetsDirectory && directory !== assetsRootDirectory,
 			) ??
 			null;
-		const manifest = themeDirectory ? await loadManifest(themeDirectory) : null;
+		const manifest = themeDirectory ? await loadThemeManifest(themeDirectory) : null;
 		const fallbackSounds = await buildFallbackSounds(this.assetsDirectory);
-		const soundsByCategory: Record<SoundCategory, string[]> = {
-			notification: [],
-			alert: [],
-			success: [],
-			error: [],
-			reminder: [],
-		};
+		const soundsByCategory = emptySoundsByCategory(SOUND_CATEGORIES);
 
 		for (const category of SOUND_CATEGORIES) {
 			const categoryCandidates: string[] = [];
@@ -427,7 +411,7 @@ export class SoundThemeService {
 			),
 		};
 
-		const mergedVolumeByFile = await resolveVolumeByFile(
+		const mergedVolumeByFile = await resolveThemeVolumeByFile(
 			{
 				...(manifest?.volumeByFile ?? {}),
 				...(mergedConfig.volumeByFile ?? {}),

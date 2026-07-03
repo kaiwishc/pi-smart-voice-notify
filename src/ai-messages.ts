@@ -1,5 +1,7 @@
 import { normalizeFloat } from "./config-store.ts";
 import { getErrorMessage } from "./logging.ts";
+import { clampRoundedInt } from "./shared/index.ts";
+import type { FlatAIMessageConfig } from "./types.ts";
 
 export const AI_EVENT_TYPES = [
 	"idle",
@@ -24,20 +26,7 @@ export interface AIMessageContext {
 	variables?: Record<string, string | number | boolean | null | undefined>;
 }
 
-export interface AIMessageConfig {
-	enableAIMessages: boolean;
-	aiEndpoint: string;
-	aiModel: string;
-	aiApiKey: string;
-	aiTimeoutMs: number;
-	aiTemperature: number;
-	aiMaxTokens: number;
-	aiFallbackToTemplates: boolean;
-	personality: string;
-	tone: string;
-	enableMessageCache: boolean;
-	messageCacheTtlMs: number;
-	maxCacheEntries: number;
+export interface AIMessageConfig extends FlatAIMessageConfig {
 	templates: Partial<Record<CoreAIEventType, string[]>>;
 }
 
@@ -128,24 +117,17 @@ export const DEFAULT_AI_MESSAGE_CONFIG: AIMessageConfig = {
 	templates: {},
 };
 
-function normalizePositiveInt(value: number, fallback: number, min: number, max: number): number {
-	if (!Number.isFinite(value)) {
-		return fallback;
-	}
-	return Math.min(max, Math.max(min, Math.round(value)));
-}
-
-function normalizeConfig(overrides: Partial<AIMessageConfig> = {}): AIMessageConfig {
+function normalizeAIMessageConfig(overrides: Partial<AIMessageConfig> = {}): AIMessageConfig {
 	return {
 		...DEFAULT_AI_MESSAGE_CONFIG,
 		...overrides,
-		aiTimeoutMs: normalizePositiveInt(
+		aiTimeoutMs: clampRoundedInt(
 			overrides.aiTimeoutMs ?? DEFAULT_AI_MESSAGE_CONFIG.aiTimeoutMs,
 			DEFAULT_AI_MESSAGE_CONFIG.aiTimeoutMs,
 			1_000,
 			60_000,
 		),
-		aiMaxTokens: normalizePositiveInt(
+		aiMaxTokens: clampRoundedInt(
 			overrides.aiMaxTokens ?? DEFAULT_AI_MESSAGE_CONFIG.aiMaxTokens,
 			DEFAULT_AI_MESSAGE_CONFIG.aiMaxTokens,
 			40,
@@ -157,13 +139,13 @@ function normalizeConfig(overrides: Partial<AIMessageConfig> = {}): AIMessageCon
 			0,
 			2,
 		),
-		messageCacheTtlMs: normalizePositiveInt(
+		messageCacheTtlMs: clampRoundedInt(
 			overrides.messageCacheTtlMs ?? DEFAULT_AI_MESSAGE_CONFIG.messageCacheTtlMs,
 			DEFAULT_AI_MESSAGE_CONFIG.messageCacheTtlMs,
 			5_000,
 			600_000,
 		),
-		maxCacheEntries: normalizePositiveInt(
+		maxCacheEntries: clampRoundedInt(
 			overrides.maxCacheEntries ?? DEFAULT_AI_MESSAGE_CONFIG.maxCacheEntries,
 			DEFAULT_AI_MESSAGE_CONFIG.maxCacheEntries,
 			20,
@@ -304,15 +286,15 @@ export class AIMessageService {
 	private readonly debugLog: (message: string, details?: Record<string, unknown>) => void;
 
 	constructor(options: AIMessageServiceOptions = {}) {
-		this.config = normalizeConfig(options.config);
+		this.config = normalizeAIMessageConfig(options.config);
 		this.debugLog = options.debugLog ?? (() => {});
 	}
 
-	public updateConfig(overrides: Partial<AIMessageConfig>): void {
-		this.config = normalizeConfig({ ...this.config, ...overrides });
+	public updateAIMessageConfig(overrides: Partial<AIMessageConfig>): void {
+		this.config = normalizeAIMessageConfig({ ...this.config, ...overrides });
 	}
 
-	public getConfig(): AIMessageConfig {
+	public getAIMessageConfig(): AIMessageConfig {
 		return { ...this.config, templates: { ...this.config.templates } };
 	}
 
@@ -449,7 +431,8 @@ export class AIMessageService {
 		}
 
 		while (this.cache.size > this.config.maxCacheEntries) {
-			const oldestKey = this.cache.keys().next().value;
+			const next = this.cache.keys().next();
+			const oldestKey = typeof next.value === "string" ? next.value : undefined;
 			if (!oldestKey) {
 				break;
 			}

@@ -1,6 +1,8 @@
 import { constants as fsConstants } from "node:fs";
-import { access, readFile, readdir, stat } from "node:fs/promises";
+import { access, readdir, stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
+
+import { loadManifestRecord, emptySoundsByCategory } from "./shared/index.ts";
 
 const PROJECT_MARKERS = [
 	".git",
@@ -95,10 +97,10 @@ export async function listAudioFiles(directory: string): Promise<string[]> {
 
 	const entries = await readdir(directory, { withFileTypes: true });
 	const candidates = entries
-		.filter((entry) => entry.isFile())
-		.map((entry) => join(directory, entry.name))
-		.filter((filePath) => AUDIO_EXTENSIONS.has(extname(filePath).toLowerCase()))
-		.sort((left, right) => left.localeCompare(right));
+		.filter((entry: import("node:fs").Dirent) => entry.isFile())
+		.map((entry: import("node:fs").Dirent) => join(directory, entry.name))
+		.filter((filePath: string) => AUDIO_EXTENSIONS.has(extname(filePath).toLowerCase()))
+		.sort((left: string, right: string) => left.localeCompare(right));
 
 	const files: string[] = [];
 	for (const filePath of candidates) {
@@ -131,7 +133,7 @@ async function hasProjectMarker(directory: string): Promise<boolean> {
 	return false;
 }
 
-export async function detectProjectRoot(cwd = process.cwd()): Promise<string | null> {
+export async function detectProjectRoot(cwd: string = process.cwd()): Promise<string | null> {
 	let currentDirectory = resolve(cwd);
 
 	while (true) {
@@ -149,31 +151,15 @@ export async function detectProjectRoot(cwd = process.cwd()): Promise<string | n
 	return null;
 }
 
-async function loadManifest(soundsDirectory: string): Promise<ProjectSoundsManifest | null> {
+async function loadProjectSoundsManifest(soundsDirectory: string): Promise<ProjectSoundsManifest | null> {
 	const candidates = [
 		"project-sounds.json",
 		"sound-theme.json",
 		"theme.json",
 		"config.json",
-	].map((fileName) => join(soundsDirectory, fileName));
-
-	for (const manifestPath of candidates) {
-		if (!(await pathExists(manifestPath))) {
-			continue;
-		}
-
-		try {
-			const raw = await readFile(manifestPath, "utf-8");
-			const parsed = JSON.parse(raw) as unknown;
-			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-				return parsed as ProjectSoundsManifest;
-			}
-		} catch {
-			return null;
-		}
-	}
-
-	return null;
+	];
+	const record = await loadManifestRecord(soundsDirectory, candidates);
+	return record as ProjectSoundsManifest | null;
 }
 
 async function resolveReference(reference: string, soundsDirectory: string): Promise<string | null> {
@@ -259,14 +245,8 @@ async function buildProjectSoundContext(projectRoot: string): Promise<ProjectSou
 		return null;
 	}
 
-	const manifest = await loadManifest(soundsDirectory);
-	const soundsByCategory: Record<ProjectSoundCategory, string[]> = {
-		notification: [],
-		alert: [],
-		success: [],
-		error: [],
-		reminder: [],
-	};
+	const manifest = await loadProjectSoundsManifest(soundsDirectory);
+	const soundsByCategory = emptySoundsByCategory(PROJECT_SOUND_CATEGORIES);
 	const soundFiles: Partial<Record<ProjectSoundCategory, string>> = {};
 	for (const category of PROJECT_SOUND_CATEGORIES) {
 		const entries = await resolveCategoryEntries(manifest, soundsDirectory, category);

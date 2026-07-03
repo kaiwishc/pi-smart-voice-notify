@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { basename } from "node:path";
 
+import { buildCommandString, attachChildHandlers } from "./shared/index.ts";
+
 const ALLOWED_ABORTABLE_COMMANDS = new Set([
 	"aplay",
 	"edge-tts",
@@ -50,10 +52,6 @@ function stringifyError(error: unknown): string {
 	return String(error);
 }
 
-function buildCommandString(command: string, args: readonly string[]): string {
-	return args.length > 0 ? `${command} ${args.join(" ")}` : command;
-}
-
 function stopChildProcess(child: ReturnType<typeof spawn>, force = false): void {
 	if (child.killed) {
 		return;
@@ -65,8 +63,10 @@ function stopChildProcess(child: ReturnType<typeof spawn>, force = false): void 
 			return;
 		}
 		child.kill(force ? "SIGKILL" : "SIGTERM");
-	} catch {
-		// noop
+	} catch (error) {
+		// Killing a process that has already exited can throw on some platforms;
+		// the error is non-actionable for shutdown/abort flows.
+		void error;
 	}
 }
 
@@ -99,7 +99,7 @@ export async function runAbortableCommand(
 	}
 
 	return await new Promise<AbortableCommandResult>((resolve) => {
-		const child = spawn(normalizedCommand, [...args], { // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- normalizedCommand is checked against ALLOWED_ABORTABLE_COMMANDS (plus the current Node executable for tests) before spawn; args are passed as an array with shell disabled.
+		const child = spawn(normalizedCommand, Array.from(args), { // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- normalizedCommand is checked against ALLOWED_ABORTABLE_COMMANDS (plus the current Node executable for tests) before spawn; args are passed as an array with shell disabled.
 			env: options.env ?? process.env,
 			cwd: options.cwd,
 		});
@@ -148,19 +148,9 @@ export async function runAbortableCommand(
 
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 
-		child.stdout?.on("data", (chunk: Buffer | string) => {
-			stdout += chunk.toString();
-		});
+		attachChildHandlers(child, (text: string) => { stdout += text; }, (text: string) => { stderr += text; }, (error: Error) => { spawnError = error; });
 
-		child.stderr?.on("data", (chunk: Buffer | string) => {
-			stderr += chunk.toString();
-		});
-
-		child.on("error", (error) => {
-			spawnError = error;
-		});
-
-		child.on("close", (code) => {
+		child.on("close", (code: number | null) => {
 			cleanup();
 			resolve({
 				code: code ?? (spawnError || timedOut || aborted ? 1 : 0),

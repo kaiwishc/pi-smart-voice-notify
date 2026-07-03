@@ -37,7 +37,7 @@ export class AudioNotificationService {
 		this.debug = options.debug;
 	}
 
-	public async wakeMonitor(): Promise<void> {
+	public async wakeSystemMonitor(): Promise<void> {
 		const config = this.getConfig();
 		if (!config.wakeMonitor) {
 			this.debug("wake.monitor.skipped", { reason: "disabled" });
@@ -187,7 +187,7 @@ public static class PiSmartVoiceNotifyWinMM {
 		}
 	}
 
-	public async speakWithSapi(text: string, signal?: AbortSignal): Promise<void> {
+	public async speakWithSapiVoice(text: string, signal?: AbortSignal): Promise<void> {
 		const config = this.getConfig();
 		if (!isWindows() || !config.enableTts) {
 			return;
@@ -276,39 +276,29 @@ try {
 		return Buffer.from(script, "utf16le").toString("base64");
 	}
 
+	private async runCommandWithFallback(executable: string, args: string[], timeout: number, signal: AbortSignal | undefined, action: string, extra?: Record<string, unknown>): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+		const startedAt = Date.now();
+		const result = signal
+			? await runAbortableCommand(executable, args, { timeoutMs: timeout, signal })
+			: await this.execRunner.exec(executable, args, { timeout });
+		return this.buildExecPayload(result, startedAt, action, extra);
+	}
+
 	private async runPowerShell(
 		script: string,
 		timeout = 20_000,
 		action = "unknown",
 		signal?: AbortSignal,
 	): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-		const startedAt = Date.now();
 		const encoded = this.encodePowerShell(script);
-		const result = signal
-			? await runAbortableCommand(
-					"powershell.exe",
-					["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-					{ timeoutMs: timeout, signal },
-				)
-			: await this.execRunner.exec(
-					"powershell.exe",
-					["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-					{ timeout },
-				);
-		const payload = {
-			ok: result.code === 0,
-			stdout: result.stdout,
-			stderr: result.stderr,
-		};
-		this.debug("powershell.exec", {
+		return this.runCommandWithFallback(
+			"powershell.exe",
+			["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+			timeout,
+			signal,
 			action,
-			ok: payload.ok,
-			exitCode: result.code,
-			durationMs: Date.now() - startedAt,
-			stdoutPreview: payload.stdout.slice(0, 300),
-			stderrPreview: payload.stderr.slice(0, 300),
-		});
-		return payload;
+			{ action: "powershell" },
+		);
 	}
 
 	private async runProcess(
@@ -318,25 +308,7 @@ try {
 		action = "process",
 		signal?: AbortSignal,
 	): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-		const startedAt = Date.now();
-		const result = signal
-			? await runAbortableCommand(executable, args, { timeoutMs: timeout, signal })
-			: await this.execRunner.exec(executable, args, { timeout });
-		const payload = {
-			ok: result.code === 0,
-			stdout: result.stdout,
-			stderr: result.stderr,
-		};
-		this.debug("process.exec", {
-			action,
-			executable,
-			ok: payload.ok,
-			exitCode: result.code,
-			durationMs: Date.now() - startedAt,
-			stdoutPreview: payload.stdout.slice(0, 300),
-			stderrPreview: payload.stderr.slice(0, 300),
-		});
-		return payload;
+		return this.runCommandWithFallback(executable, args, timeout, signal, action, { executable });
 	}
 
 	private async runShell(
@@ -345,6 +317,37 @@ try {
 		action = "shell",
 	): Promise<{ ok: boolean; stdout: string; stderr: string }> {
 		return this.runProcess("sh", ["-lc", script], timeout, action);
+	}
+
+	private buildExecPayload(result: { code: number; stdout: string; stderr: string }, startedAt: number, action: string, extra?: Record<string, unknown>): { ok: boolean; stdout: string; stderr: string } {
+		const payload = {
+			ok: result.code === 0,
+			stdout: result.stdout,
+			stderr: result.stderr,
+		};
+		this.debug("process.exec", {
+			action,
+			ok: payload.ok,
+			exitCode: result.code,
+			durationMs: Date.now() - startedAt,
+			stdoutPreview: payload.stdout.slice(0, 300),
+			stderrPreview: payload.stderr.slice(0, 300),
+			...extra,
+		});
+		return payload;
+	}
+
+	private resolveIdleSeconds(result: { ok: boolean; stdout: string }, fallbackSeconds: number): number {
+		const parsed = result.ok ? this.parseIdleSeconds(result.stdout) : null;
+		if (parsed !== null) {
+			return parsed;
+		}
+		this.debug("wake.monitor.idle_fallback", {
+			platform: process.platform,
+			reason: result.ok ? "unparseable" : "exec_failed",
+			fallbackSeconds,
+		});
+		return fallbackSeconds;
 	}
 
 	private parseIdleSeconds(stdout: string): number | null {
@@ -395,16 +398,7 @@ $idleMs = [IdleTimeProbe]::GetTickCount64() - [uint64]$info.dwTime
 [Math]::Floor($idleMs / 1000)
 `;
 			const result = await this.runPowerShell(script, 8_000, "idle-seconds-windows");
-			const parsed = result.ok ? this.parseIdleSeconds(result.stdout) : null;
-			if (parsed !== null) {
-				return parsed;
-			}
-			this.debug("wake.monitor.idle_fallback", {
-				platform: process.platform,
-				reason: result.ok ? "unparseable" : "exec_failed",
-				fallbackSeconds,
-			});
-			return fallbackSeconds;
+			return this.resolveIdleSeconds(result, fallbackSeconds);
 		}
 
 		if (process.platform === "darwin") {
@@ -413,16 +407,7 @@ $idleMs = [IdleTimeProbe]::GetTickCount64() - [uint64]$info.dwTime
 				8_000,
 				"idle-seconds-macos",
 			);
-			const parsed = result.ok ? this.parseIdleSeconds(result.stdout) : null;
-			if (parsed !== null) {
-				return parsed;
-			}
-			this.debug("wake.monitor.idle_fallback", {
-				platform: process.platform,
-				reason: result.ok ? "unparseable" : "exec_failed",
-				fallbackSeconds,
-			});
-			return fallbackSeconds;
+			return this.resolveIdleSeconds(result, fallbackSeconds);
 		}
 
 		if (process.platform === "linux") {

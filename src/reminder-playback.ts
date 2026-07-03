@@ -72,7 +72,7 @@ export class ReminderPlaybackController {
 		);
 	}
 
-	public start(
+	public startPlayback(
 		checkpoint: ReminderPlaybackCheckpoint,
 		type: NotificationType,
 		followUpCount: number,

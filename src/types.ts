@@ -1,3 +1,5 @@
+import type { EngineTtsSettings } from "./shared/index.ts";
+
 export type NotificationType = "idle" | "permission" | "question" | "error";
 export type NotificationMode = "sound-first" | "tts-first" | "both" | "sound-only";
 export type TTSEngine = "auto" | "espeak-ng" | "edge" | "elevenlabs" | "openai" | "sapi";
@@ -51,7 +53,24 @@ export interface AIMessageSettingsConfig {
 	templates: Partial<Record<string, string[]>>;
 }
 
-export interface VoiceNotifyConfig {
+/** Flat AI message config properties (mirrored in VoiceNotifyConfig). */
+export type FlatAIMessageConfig = {
+	enableAIMessages: boolean;
+	aiEndpoint: string;
+	aiModel: string;
+	aiApiKey: string;
+	aiTimeoutMs: number;
+	aiTemperature: number;
+	aiMaxTokens: number;
+	aiFallbackToTemplates: boolean;
+	personality: string;
+	tone: string;
+	enableMessageCache: boolean;
+	messageCacheTtlMs: number;
+	maxCacheEntries: number;
+};
+
+export interface VoiceNotifyConfig extends EngineTtsSettings, FlatAIMessageConfig {
 	version: 1;
 	enabled: boolean;
 	windowsOptimized: boolean;
@@ -98,26 +117,7 @@ export interface VoiceNotifyConfig {
 	sapiPitch: string;
 	sapiVolume: string;
 
-	// Engine-specific TTS settings
-	edgeVoice: string;
-	edgeRate: string;
-	edgePitch: string;
-	edgeVolume: string;
-	espeakVoice: string;
-	espeakRate: number;
-	espeakPitch: number;
-	elevenLabsApiKey: string;
-	elevenLabsVoiceId: string;
-	elevenLabsModel: string;
-	elevenLabsStability: number;
-	elevenLabsSimilarity: number;
-	elevenLabsStyle: number;
-	openaiTtsEndpoint: string;
-	openaiTtsApiKey: string;
-	openaiTtsModel: string;
-	openaiTtsVoice: string;
-	openaiTtsFormat: string;
-	openaiTtsSpeed: number;
+	// Sound files and themes
 
 	// Sound files and themes
 	idleSoundFile: string;
@@ -144,21 +144,8 @@ export interface VoiceNotifyConfig {
 
 	// AI messages (new nested + legacy flat mirrors)
 	aiMessages: AIMessageSettingsConfig;
-	enableAIMessages: boolean;
-	aiEndpoint: string;
-	aiModel: string;
-	aiApiKey: string;
-	aiTimeoutMs: number;
-	aiTemperature: number;
-	aiMaxTokens: number;
-	aiFallbackToTemplates: boolean;
-	personality: string;
-	tone: string;
 	aiPersonality: string;
 	aiTone: string;
-	enableMessageCache: boolean;
-	messageCacheTtlMs: number;
-	maxCacheEntries: number;
 	aiTemplates: Partial<Record<string, string[]>>;
 
 	// Reminder orchestration (new nested + legacy mirrors)

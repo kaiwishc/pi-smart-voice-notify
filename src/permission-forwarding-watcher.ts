@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { resolvePiAgentDir } from "./agent-dir.ts";
 import { toRecord } from "./config-store.ts";
 import { getErrorMessage } from "./logging.ts";
+import { normalizePermissionForwardingSessionId, normalizeNullableString } from "./shared/index.ts";
 
 export type PermissionForwardingSource = "primary" | "legacy";
 export type ForwardedPermissionResolutionReason = "request_removed" | "watch_disabled" | "watcher_stopped";
@@ -72,19 +73,6 @@ interface TrackedForwardedPermissionRequest extends ForwardedPermissionRequestEv
 	lastSeenAt: number;
 }
 
-function normalizePermissionForwardingSessionId(value: unknown): string | null {
-	if (typeof value !== "string") {
-		return null;
-	}
-
-	const trimmed = value.trim();
-	if (!trimmed || trimmed.toLowerCase() === "unknown") {
-		return null;
-	}
-
-	return trimmed;
-}
-
 function encodeSessionIdForPath(sessionId: string): string {
 	return encodeURIComponent(sessionId);
 }
@@ -123,11 +111,7 @@ function isForwardedPermissionRequestForSession(
 }
 
 function normalizeAgentName(value: unknown): string | null {
-	if (typeof value !== "string") {
-		return null;
-	}
-	const trimmed = value.trim();
-	return trimmed.length > 0 ? trimmed : null;
+	return normalizeNullableString(value);
 }
 
 function readJsonFromFile(filePath: string): Record<string, unknown> | null {
@@ -188,6 +172,15 @@ export class PermissionForwardingWatcher {
 	private readonly permissionForwardingRootDir: string;
 	private readonly watchers = new Map<string, FSWatcher>();
 	private readonly activeRequests = new Map<string, TrackedForwardedPermissionRequest>();
+
+	private logWatcherEvent(event: string, directory: WatchDirectoryEntry, extra?: Record<string, unknown>): void {
+		this.debugLog(`permission_forwarding.${event}`, {
+			source: directory.source,
+			kind: directory.kind,
+			path: directory.path,
+			...extra,
+		});
+	}
 	private readonly parseFailureCountByFile = new Map<string, number>();
 	private readonly missingDirectoryLogged = new Set<string>();
 	private legacyPathWarningLogged = false;
@@ -206,7 +199,7 @@ export class PermissionForwardingWatcher {
 		this.permissionForwardingRootDir = options.permissionForwardingRootDir ?? PERMISSION_FORWARDING_ROOT_DIR;
 	}
 
-	public start(config: PermissionForwardingWatcherConfig): void {
+	public startWatching(config: PermissionForwardingWatcherConfig): void {
 		const previousSessionId = normalizePermissionForwardingSessionId(this.config.targetSessionId);
 		this.config = config;
 		const currentSessionId = normalizePermissionForwardingSessionId(config.targetSessionId);
@@ -225,14 +218,12 @@ export class PermissionForwardingWatcher {
 		this.refreshFallbackScanTimer();
 	}
 
-	public updateConfig(config: PermissionForwardingWatcherConfig): void {
-		this.start(config);
+	public restart(config: PermissionForwardingWatcherConfig): void {
+		this.startWatching(config);
 	}
 
 	public stop(): void {
-		this.closeAllWatchers();
-		this.clearFallbackScanTimer();
-		this.resolveTrackedRequests("watcher_stopped");
+		this.deactivate("watcher_stopped");
 	}
 
 	private deactivate(reason: ForwardedPermissionResolutionReason): void {
@@ -373,28 +364,14 @@ export class PermissionForwardingWatcher {
 					this.queueScan(`watch:${directory.source}:${directory.kind}`);
 				});
 				watcher.on("error", (error) => {
-					this.debugLog("permission_forwarding.watcher.error", {
-						source: directory.source,
-						kind: directory.kind,
-						path: directory.path,
-						error: getErrorMessage(error),
-					});
+					this.logWatcherEvent("watcher.error", directory, { error: getErrorMessage(error) });
 					this.closeWatcher(watcherKey);
 					this.refreshFallbackScanTimer();
 				});
 				this.watchers.set(watcherKey, watcher);
-				this.debugLog("permission_forwarding.watcher.started", {
-					source: directory.source,
-					kind: directory.kind,
-					path: directory.path,
-				});
+				this.logWatcherEvent("watcher.started", directory);
 			} catch (error) {
-				this.debugLog("permission_forwarding.watcher.start_failed", {
-					source: directory.source,
-					kind: directory.kind,
-					path: directory.path,
-					error: getErrorMessage(error),
-				});
+				this.logWatcherEvent("watcher.start_failed", directory, { error: getErrorMessage(error) });
 			}
 		}
 		this.refreshFallbackScanTimer();
@@ -480,7 +457,8 @@ export class PermissionForwardingWatcher {
 
 	private enforceParseFailureMapLimit(): void {
 		while (this.parseFailureCountByFile.size > MAX_TRACKED_PARSE_FAILURE_FILES) {
-			const oldestFilePath = this.parseFailureCountByFile.keys().next().value;
+			const next = this.parseFailureCountByFile.keys().next();
+			const oldestFilePath = typeof next.value === "string" ? next.value : undefined;
 			if (typeof oldestFilePath !== "string") {
 				return;
 			}

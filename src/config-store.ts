@@ -2,6 +2,19 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 import { resolvePiAgentDir } from "./agent-dir.ts";
+import {
+	clampInt,
+	clampNumber,
+	normalizeFloat,
+	normalizeStringEnum,
+	normalizeStringEnumArray,
+	parseEnvBoolean,
+	readEnvFrom,
+	toRecord,
+	ENGINE_TTS_DEFAULTS,
+} from "./shared/index.ts";
+
+export { clampInt, clampNumber, normalizeFloat, toRecord };
 import type {
 	ConcreteTTSEngine,
 	MessageSet,
@@ -159,25 +172,7 @@ export const DEFAULT_CONFIG: VoiceNotifyConfig = {
 	sapiPitch: "medium",
 	sapiVolume: "loud",
 
-	edgeVoice: "en-US-JennyNeural",
-	edgeRate: "+10%",
-	edgePitch: "+0Hz",
-	edgeVolume: "+0%",
-	espeakVoice: "en",
-	espeakRate: 175,
-	espeakPitch: 50,
-	elevenLabsApiKey: "",
-	elevenLabsVoiceId: "cgSgspJ2msm6clMCkdW9",
-	elevenLabsModel: "eleven_turbo_v2_5",
-	elevenLabsStability: 0.5,
-	elevenLabsSimilarity: 0.75,
-	elevenLabsStyle: 0.5,
-	openaiTtsEndpoint: "",
-	openaiTtsApiKey: "",
-	openaiTtsModel: "tts-1",
-	openaiTtsVoice: "alloy",
-	openaiTtsFormat: "mp3",
-	openaiTtsSpeed: 1,
+	...ENGINE_TTS_DEFAULTS,
 
 	idleSoundFile: "assets/soft-notification.mp3",
 	permissionSoundFile: "assets/attention-alert.mp3",
@@ -261,71 +256,12 @@ export const DEFAULT_CONFIG: VoiceNotifyConfig = {
 	debugLog: false,
 };
 
-export function toRecord(value: unknown): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		return {};
-	}
-	return value as Record<string, unknown>;
-}
-
 function readEnv(...keys: string[]): string {
-	for (const key of keys) {
-		const value = process.env[key];
-		if (typeof value === "string" && value.trim().length > 0) {
-			return value.trim();
-		}
-	}
-	return "";
+	return readEnvFrom(...keys);
 }
 
 function parseEnvBool(value: string): boolean | undefined {
-	if (!value) {
-		return undefined;
-	}
-	const normalized = value.trim().toLowerCase();
-	if (["1", "true", "yes", "on"].includes(normalized)) {
-		return true;
-	}
-	if (["0", "false", "no", "off"].includes(normalized)) {
-		return false;
-	}
-	return undefined;
-}
-
-function parseNumeric(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isFinite(value)) {
-		return value;
-	}
-	if (typeof value === "string" && value.trim().length > 0) {
-		const parsed = Number(value.trim());
-		if (Number.isFinite(parsed)) {
-			return parsed;
-		}
-	}
-	return undefined;
-}
-
-export function clampInt(value: unknown, fallback: number, min: number, max: number): number {
-	const numeric = parseNumeric(value);
-	if (numeric === undefined) {
-		return fallback;
-	}
-	return Math.min(max, Math.max(min, Math.trunc(numeric)));
-}
-
-export function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
-	const numeric = parseNumeric(value);
-	if (numeric === undefined) {
-		return fallback;
-	}
-	return Math.min(max, Math.max(min, numeric));
-}
-
-export function normalizeFloat(value: number, fallback: number, min: number, max: number): number {
-	if (!Number.isFinite(value)) {
-		return fallback;
-	}
-	return Math.min(max, Math.max(min, value));
+	return parseEnvBoolean(value);
 }
 
 function boolOrDefault(value: unknown, fallback: boolean): boolean {
@@ -402,17 +338,11 @@ function normalizeStringArray(value: unknown): string[] {
 }
 
 function normalizeNotificationTypes(value: unknown, fallback: NotificationType[]): NotificationType[] {
-	const candidates = normalizeStringArray(value)
-		.map((entry) => entry.toLowerCase())
-		.filter((entry): entry is NotificationType => NOTIFICATION_TYPE_VALUES.includes(entry as NotificationType));
-	return candidates.length > 0 ? [...new Set(candidates)] : [...fallback];
+	return normalizeStringEnumArray(value, NOTIFICATION_TYPE_VALUES, fallback);
 }
 
 function normalizeFallbackChain(value: unknown, fallback: ConcreteTTSEngine[]): ConcreteTTSEngine[] {
-	const candidates = normalizeStringArray(value)
-		.map((entry) => entry.toLowerCase())
-		.filter((entry): entry is ConcreteTTSEngine => CONCRETE_TTS_ENGINE_VALUES.includes(entry as ConcreteTTSEngine));
-	return candidates.length > 0 ? [...new Set(candidates)] : [...fallback];
+	return normalizeStringEnumArray(value, CONCRETE_TTS_ENGINE_VALUES, fallback);
 }
 
 function normalizeTemplates(value: unknown): Partial<Record<string, string[]>> {
@@ -484,17 +414,11 @@ function isHttpUrl(url: string): boolean {
 }
 
 export function normalizeMode(value: unknown): NotificationMode {
-	if (typeof value === "string" && NOTIFICATION_MODES.includes(value as NotificationMode)) {
-		return value as NotificationMode;
-	}
-	return DEFAULT_CONFIG.notificationMode;
+	return normalizeStringEnum(value, NOTIFICATION_MODES, DEFAULT_CONFIG.notificationMode);
 }
 
 export function normalizeTtsEngine(value: unknown): TTSEngine {
-	if (typeof value === "string" && TTS_ENGINE_VALUES.includes(value as TTSEngine)) {
-		return value as TTSEngine;
-	}
-	return DEFAULT_CONFIG.ttsEngine;
+	return normalizeStringEnum(value, TTS_ENGINE_VALUES, DEFAULT_CONFIG.ttsEngine);
 }
 
 export function normalizeConfig(raw: unknown): VoiceNotifyConfig {

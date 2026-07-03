@@ -1,5 +1,6 @@
 import type { NotificationType } from "./types.ts";
 import { getErrorMessage } from "./logging.ts";
+import { clampRoundedInt } from "./shared/index.ts";
 
 type LinuxUrgency = "low" | "normal" | "critical";
 
@@ -46,10 +47,7 @@ const LINUX_URGENCY: Record<NotificationType, LinuxUrgency> = {
 let notifierPromise: Promise<NotifierLike | null> | null = null;
 
 function clampTimeoutSeconds(value: number): number {
-	if (!Number.isFinite(value)) {
-		return 5;
-	}
-	return Math.min(60, Math.max(1, Math.trunc(value)));
+	return clampRoundedInt(value, 5, 1, 60);
 }
 
 export function checkDesktopNotificationSupport(platform = process.platform): DesktopNotificationSupport {
@@ -91,17 +89,26 @@ function buildNotifierOptions(request: DesktopNotificationRequest): Record<strin
 	return baseOptions;
 }
 
+interface NodeNotifierModule {
+	default?: NodeNotifierExport;
+	notify?: NotifierLike["notify"];
+}
+
+interface NodeNotifierExport {
+	notify?: NotifierLike["notify"];
+}
+
 async function getNotifier(): Promise<NotifierLike | null> {
-	if (!notifierPromise) {
+	if (notifierPromise === null) {
 		notifierPromise = import("node-notifier")
-			.then((module) => {
-				const candidate = (module.default ?? module) as { notify?: NotifierLike["notify"] };
+			.then((module: NodeNotifierModule): NotifierLike | null => {
+				const candidate: NodeNotifierExport = (module.default ?? module) as NodeNotifierExport;
 				if (typeof candidate.notify !== "function") {
 					return null;
 				}
 				return { notify: candidate.notify };
 			})
-			.catch(() => null);
+			.catch((): null => null);
 	}
 	return notifierPromise;
 }

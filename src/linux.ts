@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 
 import { getErrorMessage } from "./logging.ts";
+import { buildCommandString, attachChildHandlers } from "./shared/index.ts";
 import type {
 	LinuxCommandResult,
 	LinuxSessionInfo,
@@ -15,13 +16,6 @@ type LinuxCommandName = "xset" | "gdbus" | "pactl" | "amixer" | "paplay" | "apla
 
 function createDebugLog(options?: LinuxUtilsOptions): DebugLog {
 	return options?.debugLog ?? (() => {});
-}
-
-function buildCommandString(command: string, args: string[]): string {
-	if (args.length === 0) {
-		return command;
-	}
-	return `${command} ${args.join(" ")}`;
 }
 
 function spawnLinuxCommand(command: LinuxCommandName, args: string[]) {
@@ -43,7 +37,7 @@ function spawnLinuxCommand(command: LinuxCommandName, args: string[]) {
 	}
 }
 
-async function runSpawnCommand(
+async function runLinuxSpawnCommand(
 	command: LinuxCommandName,
 	args: string[],
 	timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -61,19 +55,12 @@ async function runSpawnCommand(
 			child.kill("SIGTERM");
 		}, timeoutMs);
 
-		child.stdout.on("data", (chunk: Buffer | string) => {
-			stdout += chunk.toString();
-		});
+		const collectStdout = (text: string) => { stdout += text; };
+		const collectStderr = (text: string) => { stderr += text; };
+		const captureError = (error: Error) => { spawnError = error; };
+		attachChildHandlers(child, collectStdout, collectStderr, captureError);
 
-		child.stderr.on("data", (chunk: Buffer | string) => {
-			stderr += chunk.toString();
-		});
-
-		child.on("error", (error) => {
-			spawnError = error;
-		});
-
-		child.on("close", (exitCode, signal) => {
+		child.on("close", (exitCode: number | null, signal: NodeJS.Signals | null) => {
 			clearTimeout(timeout);
 			const success = exitCode === 0 && !timedOut && !spawnError;
 			resolve({
@@ -95,8 +82,8 @@ async function runSpawnCommand(
 	});
 }
 
-function parsePactlVolume(output: string): number {
-	const match = output.match(/(\d+)%/);
+function parseVolumePercent(output: string, pattern: RegExp): number {
+	const match = output.match(pattern);
 	if (!match?.[1]) {
 		return -1;
 	}
@@ -107,16 +94,12 @@ function parsePactlVolume(output: string): number {
 	return volume;
 }
 
+function parsePactlVolume(output: string): number {
+	return parseVolumePercent(output, /(\d+)%/);
+}
+
 function parseAmixerVolume(output: string): number {
-	const match = output.match(/\[(\d+)%\]/);
-	if (!match?.[1]) {
-		return -1;
-	}
-	const volume = Number.parseInt(match[1], 10);
-	if (!Number.isFinite(volume)) {
-		return -1;
-	}
-	return volume;
+	return parseVolumePercent(output, /\[(\d+)%\]/);
 }
 
 function normalizeSessionType(value: string | undefined): LinuxSessionType {
@@ -186,7 +169,7 @@ export async function wakeMonitor(options: LinuxUtilsOptions = {}): Promise<bool
 		: [wakeCommands[0], wakeCommands[1]];
 
 	for (const wakeCommand of ordered) {
-		const result = await runSpawnCommand(wakeCommand.command, wakeCommand.args, DEFAULT_TIMEOUT_MS);
+		const result = await runLinuxSpawnCommand(wakeCommand.command, wakeCommand.args, DEFAULT_TIMEOUT_MS);
 		if (result.success) {
 			debugLog(`wakeMonitor: ${wakeCommand.name} succeeded`);
 			return true;
@@ -200,14 +183,27 @@ export async function wakeMonitor(options: LinuxUtilsOptions = {}): Promise<bool
 	return false;
 }
 
+function logCommandFailure(debugLog: DebugLog, fnName: string, result: LinuxCommandResult, suffix?: string): void {
+	debugLog(
+		`${fnName}: failed (exitCode=${result.exitCode}, stderr=${result.stderr.trim() || result.errorMessage || "none"})${suffix ?? ""}`,
+	);
+}
+
+function assertLinuxPlatform(debugLog: DebugLog, fnName: string): boolean {
+	if (process.platform !== "linux") {
+		debugLog(`${fnName}: unsupported platform ${process.platform}`);
+		return false;
+	}
+	return true;
+}
+
 export async function getCurrentVolume(options: LinuxUtilsOptions = {}): Promise<number> {
 	const debugLog = createDebugLog(options);
-	if (process.platform !== "linux") {
-		debugLog(`getCurrentVolume: unsupported platform ${process.platform}`);
+	if (!assertLinuxPlatform(debugLog, "getCurrentVolume")) {
 		return -1;
 	}
 
-	const pulseResult = await runSpawnCommand("pactl", ["get-sink-volume", "@DEFAULT_SINK@"]);
+	const pulseResult = await runLinuxSpawnCommand("pactl", ["get-sink-volume", "@DEFAULT_SINK@"]);
 	if (pulseResult.success) {
 		const pulseVolume = parsePactlVolume(pulseResult.stdout);
 		if (pulseVolume >= 0) {
@@ -215,16 +211,12 @@ export async function getCurrentVolume(options: LinuxUtilsOptions = {}): Promise
 		}
 		debugLog("getCurrentVolume: pactl output could not be parsed, falling back to ALSA");
 	} else {
-		debugLog(
-			`getCurrentVolume: pactl failed (exitCode=${pulseResult.exitCode}, stderr=${pulseResult.stderr.trim() || pulseResult.errorMessage || "none"})`,
-		);
+		logCommandFailure(debugLog, "getCurrentVolume", pulseResult);
 	}
 
-	const alsaResult = await runSpawnCommand("amixer", ["get", "Master"]);
+	const alsaResult = await runLinuxSpawnCommand("amixer", ["get", "Master"]);
 	if (!alsaResult.success) {
-		debugLog(
-			`getCurrentVolume: amixer failed (exitCode=${alsaResult.exitCode}, stderr=${alsaResult.stderr.trim() || alsaResult.errorMessage || "none"})`,
-		);
+		logCommandFailure(debugLog, "getCurrentVolume", alsaResult);
 		return -1;
 	}
 
@@ -247,7 +239,7 @@ export async function setVolume(volume: number, options: LinuxUtilsOptions = {})
 
 	const clampedVolume = Math.max(0, Math.min(100, Math.round(volume)));
 
-	const pulseResult = await runSpawnCommand("pactl", [
+	const pulseResult = await runLinuxSpawnCommand("pactl", [
 		"set-sink-volume",
 		"@DEFAULT_SINK@",
 		`${clampedVolume}%`,
@@ -255,15 +247,11 @@ export async function setVolume(volume: number, options: LinuxUtilsOptions = {})
 	if (pulseResult.success) {
 		return true;
 	}
-	debugLog(
-		`setVolume: pactl failed (exitCode=${pulseResult.exitCode}, stderr=${pulseResult.stderr.trim() || pulseResult.errorMessage || "none"}), falling back to ALSA`,
-	);
+	logCommandFailure(debugLog, "setVolume", pulseResult, ", falling back to ALSA");
 
-	const alsaResult = await runSpawnCommand("amixer", ["set", "Master", `${clampedVolume}%`, "unmute"]);
+	const alsaResult = await runLinuxSpawnCommand("amixer", ["set", "Master", `${clampedVolume}%`, "unmute"]);
 	if (!alsaResult.success) {
-		debugLog(
-			`setVolume: amixer failed (exitCode=${alsaResult.exitCode}, stderr=${alsaResult.stderr.trim() || alsaResult.errorMessage || "none"})`,
-		);
+		logCommandFailure(debugLog, "setVolume", alsaResult);
 		return false;
 	}
 
@@ -286,23 +274,19 @@ export async function playAudio(
 
 	const playCount = Math.max(1, Math.min(20, Math.floor(loops)));
 	for (let attempt = 0; attempt < playCount; attempt += 1) {
-		const pulseResult = await runSpawnCommand("paplay", [filePath], DEFAULT_AUDIO_TIMEOUT_MS);
+		const pulseResult = await runLinuxSpawnCommand("paplay", [filePath], DEFAULT_AUDIO_TIMEOUT_MS);
 		if (pulseResult.success) {
 			continue;
 		}
 
-		debugLog(
-			`playAudio: paplay failed (exitCode=${pulseResult.exitCode}, stderr=${pulseResult.stderr.trim() || pulseResult.errorMessage || "none"}), falling back to aplay`,
-		);
+		logCommandFailure(debugLog, "playAudio", pulseResult, ", falling back to aplay");
 
-		const alsaResult = await runSpawnCommand("aplay", [filePath], DEFAULT_AUDIO_TIMEOUT_MS);
+		const alsaResult = await runLinuxSpawnCommand("aplay", [filePath], DEFAULT_AUDIO_TIMEOUT_MS);
 		if (alsaResult.success) {
 			continue;
 		}
 
-		debugLog(
-			`playAudio: aplay failed (exitCode=${alsaResult.exitCode}, stderr=${alsaResult.stderr.trim() || alsaResult.errorMessage || "none"})`,
-		);
+		logCommandFailure(debugLog, "playAudio", alsaResult);
 		return false;
 	}
 
@@ -311,12 +295,11 @@ export async function playAudio(
 
 export async function getIdleTime(options: LinuxUtilsOptions = {}): Promise<number> {
 	const debugLog = createDebugLog(options);
-	if (process.platform !== "linux") {
-		debugLog(`getIdleTime: unsupported platform ${process.platform}`);
+	if (!assertLinuxPlatform(debugLog, "getIdleTime")) {
 		return -1;
 	}
 
-	const result = await runSpawnCommand("xprintidle", [], 6_000);
+	const result = await runLinuxSpawnCommand("xprintidle", [], 6_000);
 	if (!result.success) {
 		debugLog(
 			`getIdleTime: xprintidle failed (exitCode=${result.exitCode}, stderr=${result.stderr.trim() || result.errorMessage || "none"})`,

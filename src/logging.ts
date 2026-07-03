@@ -9,7 +9,7 @@ export function getErrorMessage(error: unknown): string {
 
 function safeJsonStringify(value: unknown): string {
 	const seen = new WeakSet<object>();
-	return JSON.stringify(value, (_key, currentValue) => {
+	return JSON.stringify(value, (_key, currentValue: unknown) => {
 		if (currentValue instanceof Error) {
 			return {
 				name: currentValue.name,
@@ -21,10 +21,11 @@ function safeJsonStringify(value: unknown): string {
 			return currentValue.toString();
 		}
 		if (typeof currentValue === "object" && currentValue !== null) {
-			if (seen.has(currentValue)) {
+			const objectValue = currentValue as object;
+			if (seen.has(objectValue)) {
 				return "[Circular]";
 			}
-			seen.add(currentValue);
+			seen.add(objectValue);
 		}
 		return currentValue;
 	});
@@ -71,8 +72,10 @@ export function createExtensionLogger(options: LoggerOptions): ExtensionLogger {
 				...details,
 			});
 			enqueueAppend(line);
-		} catch {
+		} catch (error) {
 			// Debug logging must never write to stdout/stderr from extension code.
+			// Swallow formatting/IO failures so a logging bug cannot crash the agent.
+			void error;
 		}
 	};
 

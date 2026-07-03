@@ -187,7 +187,7 @@ function detectWaylandDesktop(env: NodeJS.ProcessEnv = process.env): WaylandDesk
 	return "unknown";
 }
 
-async function runCommand(
+async function runFocusCommand(
 	command: string,
 	args: readonly string[],
 	label: string,
@@ -233,7 +233,7 @@ async function runCommand(
 }
 
 function parseQuotedValues(text: string): string[] {
-	const matches = text.match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g) ?? [];
+	const matches: string[] = text.match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g) ?? [];
 	return matches
 		.map((value) => value.slice(1, -1).trim())
 		.filter((value) => value.length > 0);
@@ -245,7 +245,7 @@ function getEncodedPowerShellScript(script: string): string {
 
 async function getFocusedWindowWindows(options: FocusDetectOptions): Promise<string | null> {
 	const encodedScript = getEncodedPowerShellScript(POWERSHELL_GET_FRONTMOST_PROCESS);
-	return runCommand(
+	return runFocusCommand(
 		"powershell",
 		["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript],
 		"windows.powershell.frontmost_process",
@@ -255,7 +255,7 @@ async function getFocusedWindowWindows(options: FocusDetectOptions): Promise<str
 }
 
 async function getFocusedWindowX11(options: FocusDetectOptions): Promise<string | null> {
-	const activeWindow = await runCommand("xdotool", ["getactivewindow"], "x11.xdotool.getactivewindow", options);
+	const activeWindow = await runFocusCommand("xdotool", ["getactivewindow"], "x11.xdotool.getactivewindow", options);
 	if (!activeWindow) {
 		return null;
 	}
@@ -266,7 +266,7 @@ async function getFocusedWindowX11(options: FocusDetectOptions): Promise<string 
 		return null;
 	}
 
-	const windowProps = await runCommand(
+	const windowProps = await runFocusCommand(
 		"xprop",
 		["-id", windowId, "WM_CLASS", "WM_NAME", "_NET_WM_NAME"],
 		"x11.xprop.window",
@@ -301,7 +301,7 @@ function findFocusedSwayNode(node: SwayTreeNode): SwayTreeNode | null {
 }
 
 async function getFocusedWindowWaylandSway(options: FocusDetectOptions): Promise<string | null> {
-	const treeOutput = await runCommand("swaymsg", ["-t", "get_tree"], "wayland.sway.get_tree", options, 8 * 1024 * 1024);
+	const treeOutput = await runFocusCommand("swaymsg", ["-t", "get_tree"], "wayland.sway.get_tree", options, 8 * 1024 * 1024);
 	if (!treeOutput) {
 		return null;
 	}
@@ -353,7 +353,7 @@ async function getFocusedWindowWaylandGnome(options: FocusDetectOptions): Promis
 	const script =
 		'(() => { const w = global.display.focus_window; if (!w) return ""; return [w.get_wm_class_instance && w.get_wm_class_instance(), w.get_wm_class && w.get_wm_class(), w.get_title && w.get_title()].filter(Boolean).join(" "); })()';
 
-	const evalOutput = await runCommand(
+	const evalOutput = await runFocusCommand(
 		"gdbus",
 		[
 			"call",

@@ -7,6 +7,11 @@ import { join } from "node:path";
 import { runAbortableCommand } from "./abortable-command.ts";
 import { normalizeFloat } from "./config-store.ts";
 import { getErrorMessage } from "./logging.ts";
+import {
+	clampRoundedInt,
+	readEnvFrom,
+	ENGINE_TTS_DEFAULTS,
+} from "./shared/index.ts";
 import type {
 	ConcreteTTSEngine,
 	SpeakOptions,
@@ -24,25 +29,7 @@ const DEFAULT_TTS_CONFIG: TTSConfig = {
 	ttsEngine: "auto",
 	fallbackChain: ["edge", "espeak-ng", "sapi"],
 	commandTimeoutMs: 30_000,
-	edgeVoice: "en-US-JennyNeural",
-	edgeRate: "+10%",
-	edgePitch: "+0Hz",
-	edgeVolume: "+0%",
-	espeakVoice: "en",
-	espeakRate: 175,
-	espeakPitch: 50,
-	elevenLabsApiKey: "",
-	elevenLabsVoiceId: "cgSgspJ2msm6clMCkdW9",
-	elevenLabsModel: "eleven_turbo_v2_5",
-	elevenLabsStability: 0.5,
-	elevenLabsSimilarity: 0.75,
-	elevenLabsStyle: 0.5,
-	openaiTtsEndpoint: "",
-	openaiTtsApiKey: "",
-	openaiTtsModel: "tts-1",
-	openaiTtsVoice: "alloy",
-	openaiTtsFormat: "mp3",
-	openaiTtsSpeed: 1,
+	...ENGINE_TTS_DEFAULTS,
 	sapiVoice: "Microsoft Zira Desktop",
 	sapiRate: -1,
 };
@@ -57,43 +44,20 @@ const EMPTY_AVAILABILITY: TTSAvailability = {
 
 const MAX_TTS_AUDIO_RESPONSE_BYTES = 10 * 1024 * 1024;
 
-function fromEnv(...keys: string[]): string {
-	for (const key of keys) {
-		const value = process.env[key];
-		if (typeof value === "string" && value.trim().length > 0) {
-			return value.trim();
-		}
-	}
-	return "";
+function mergeFloat(base: number, override: number | undefined, min: number, max: number): number {
+	return normalizeFloat(override ?? base, base, min, max);
 }
 
-function normalizeRate(value: number, fallback: number, min: number, max: number): number {
-	if (!Number.isFinite(value)) {
-		return fallback;
-	}
-	return Math.min(max, Math.max(min, Math.round(value)));
-}
-
-function mergeConfig(base: TTSConfig, overrides: Partial<TTSConfig>): TTSConfig {
+function mergeTtsConfig(base: TTSConfig, overrides: Partial<TTSConfig>): TTSConfig {
 	return {
 		...base,
 		...overrides,
 		fallbackChain: overrides.fallbackChain ? [...overrides.fallbackChain] : [...base.fallbackChain],
-		commandTimeoutMs: normalizeRate(overrides.commandTimeoutMs ?? base.commandTimeoutMs, base.commandTimeoutMs, 3_000, 120_000),
-		espeakRate: normalizeRate(overrides.espeakRate ?? base.espeakRate, base.espeakRate, 80, 450),
-		espeakPitch: normalizeRate(overrides.espeakPitch ?? base.espeakPitch, base.espeakPitch, 0, 99),
-		elevenLabsStability: normalizeFloat(
-			overrides.elevenLabsStability ?? base.elevenLabsStability,
-			base.elevenLabsStability,
-			0,
-			1,
-		),
-		elevenLabsSimilarity: normalizeFloat(
-			overrides.elevenLabsSimilarity ?? base.elevenLabsSimilarity,
-			base.elevenLabsSimilarity,
-			0,
-			1,
-		),
+		commandTimeoutMs: clampRoundedInt(overrides.commandTimeoutMs ?? base.commandTimeoutMs, base.commandTimeoutMs, 3_000, 120_000),
+		espeakRate: clampRoundedInt(overrides.espeakRate ?? base.espeakRate, base.espeakRate, 80, 450),
+		espeakPitch: clampRoundedInt(overrides.espeakPitch ?? base.espeakPitch, base.espeakPitch, 0, 99),
+		elevenLabsStability: mergeFloat(base.elevenLabsStability, overrides.elevenLabsStability, 0, 1),
+		elevenLabsSimilarity: mergeFloat(base.elevenLabsSimilarity, overrides.elevenLabsSimilarity, 0, 1),
 		elevenLabsStyle: normalizeFloat(
 			overrides.elevenLabsStyle ?? base.elevenLabsStyle,
 			base.elevenLabsStyle,
@@ -101,28 +65,28 @@ function mergeConfig(base: TTSConfig, overrides: Partial<TTSConfig>): TTSConfig 
 			1,
 		),
 		openaiTtsSpeed: normalizeFloat(overrides.openaiTtsSpeed ?? base.openaiTtsSpeed, base.openaiTtsSpeed, 0.25, 4),
-		sapiRate: normalizeRate(overrides.sapiRate ?? base.sapiRate, base.sapiRate, -10, 10),
+		sapiRate: clampRoundedInt(overrides.sapiRate ?? base.sapiRate, base.sapiRate, -10, 10),
 	};
 }
 
 function createConfig(overrides: Partial<TTSConfig> = {}): TTSConfig {
 	const envConfig: Partial<TTSConfig> = {
-		ttsEngine: (fromEnv("PI_SMART_VOICE_NOTIFY_TTS_ENGINE", "PI_TTS_ENGINE") as TTSEngine) || undefined,
+		ttsEngine: (readEnvFrom("PI_SMART_VOICE_NOTIFY_TTS_ENGINE", "PI_TTS_ENGINE") as TTSEngine) || undefined,
 		elevenLabsApiKey:
 			overrides.elevenLabsApiKey ||
-			fromEnv("ELEVENLABS_API_KEY", "PI_SMART_VOICE_NOTIFY_ELEVENLABS_API_KEY"),
+			readEnvFrom("ELEVENLABS_API_KEY", "PI_SMART_VOICE_NOTIFY_ELEVENLABS_API_KEY"),
 		elevenLabsVoiceId:
 			overrides.elevenLabsVoiceId ||
-			fromEnv("ELEVENLABS_VOICE_ID", "PI_SMART_VOICE_NOTIFY_ELEVENLABS_VOICE_ID"),
+			readEnvFrom("ELEVENLABS_VOICE_ID", "PI_SMART_VOICE_NOTIFY_ELEVENLABS_VOICE_ID"),
 		openaiTtsEndpoint:
 			overrides.openaiTtsEndpoint ||
-			fromEnv("OPENAI_TTS_ENDPOINT", "OPENAI_BASE_URL", "PI_SMART_VOICE_NOTIFY_OPENAI_TTS_ENDPOINT"),
+			readEnvFrom("OPENAI_TTS_ENDPOINT", "OPENAI_BASE_URL", "PI_SMART_VOICE_NOTIFY_OPENAI_TTS_ENDPOINT"),
 		openaiTtsApiKey:
 			overrides.openaiTtsApiKey ||
-			fromEnv("OPENAI_API_KEY", "OPENAI_TTS_API_KEY", "PI_SMART_VOICE_NOTIFY_OPENAI_TTS_API_KEY"),
+			readEnvFrom("OPENAI_API_KEY", "OPENAI_TTS_API_KEY", "PI_SMART_VOICE_NOTIFY_OPENAI_TTS_API_KEY"),
 	};
 
-	const merged = mergeConfig(DEFAULT_TTS_CONFIG, { ...envConfig, ...overrides });
+	const merged = mergeTtsConfig(DEFAULT_TTS_CONFIG, { ...envConfig, ...overrides });
 	const validEngines: TTSEngine[] = ["auto", "espeak-ng", "edge", "elevenlabs", "openai", "sapi"];
 	if (!validEngines.includes(merged.ttsEngine)) {
 		merged.ttsEngine = DEFAULT_TTS_CONFIG.ttsEngine;
@@ -133,8 +97,9 @@ function createConfig(overrides: Partial<TTSConfig> = {}): TTSConfig {
 async function removeTempFile(filePath: string): Promise<void> {
 	try {
 		await unlink(filePath);
-	} catch {
-		// noop
+	} catch (error) {
+		// Temp-file cleanup is best-effort; a missing or locked file is non-fatal.
+		void error;
 	}
 }
 
@@ -234,7 +199,7 @@ async function readAudioResponseWithLimit(
 	);
 }
 
-async function runSpawnCommand(
+async function runTtsCommand(
 	command: string,
 	args: string[],
 	timeoutMs: number,
@@ -262,10 +227,10 @@ class TTSEngineService implements TTSService {
 		this.execRunner = options.execRunner;
 		this.debug = options.debug ?? (() => {});
 		this.config = createConfig(options.config);
-		this.initialization = this.detectAvailableEngines();
+		this.initialization = this.refreshEngineAvailability();
 	}
 
-	public async detectAvailableEngines(): Promise<TTSAvailability> {
+	public async refreshEngineAvailability(): Promise<TTSAvailability> {
 		const [hasEspeak, hasEdgeCli, hasPowerShell, hasEdgeModule] = await Promise.all([
 			this.commandExists("espeak-ng"),
 			this.commandExists("edge-tts"),
@@ -311,7 +276,7 @@ class TTSEngineService implements TTSService {
 				throwIfAborted(options.signal);
 				await this.initialization;
 				throwIfAborted(options.signal);
-				const activeConfig = mergeConfig(this.config, options);
+				const activeConfig = mergeTtsConfig(this.config, options);
 				const chain = this.resolveEngineChain(engine, activeConfig);
 
 				for (const candidate of chain) {
@@ -353,8 +318,8 @@ class TTSEngineService implements TTSService {
 
 		const queued = this.speechQueue.then(run, run);
 		this.speechQueue = queued.then(
-			() => undefined,
-			() => undefined,
+			(): void => undefined,
+			(): void => undefined,
 		);
 		return await queued;
 	}
@@ -520,46 +485,20 @@ class TTSEngineService implements TTSService {
 		const fetchSignal = createFetchTimeoutSignal(config.commandTimeoutMs, signal);
 		try {
 			const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(config.elevenLabsVoiceId)}`;
-			const response = await fetch(endpoint, {
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					"xi-api-key": config.elevenLabsApiKey,
+			const response = await this.fetchJsonPost(endpoint, { "xi-api-key": config.elevenLabsApiKey }, {
+				text,
+				model_id: config.elevenLabsModel,
+				voice_settings: {
+					stability: config.elevenLabsStability,
+					similarity_boost: config.elevenLabsSimilarity,
+					style: config.elevenLabsStyle,
+					use_speaker_boost: true,
 				},
-				signal: fetchSignal.signal,
-				body: JSON.stringify({
-					text,
-					model_id: config.elevenLabsModel,
-					voice_settings: {
-						stability: config.elevenLabsStability,
-						similarity_boost: config.elevenLabsSimilarity,
-						style: config.elevenLabsStyle,
-						use_speaker_boost: true,
-					},
-				}),
-			});
+			}, fetchSignal.signal);
 
-			if (!response.ok) {
-				this.debug("tts.elevenlabs.http_error", { status: response.status });
-				return false;
-			}
-
-			throwIfAborted(fetchSignal.signal);
-			const audioBuffer = await readAudioResponseWithLimit(
-				response,
-				MAX_TTS_AUDIO_RESPONSE_BYTES,
-				fetchSignal.signal,
-			);
-			await writeFile(tempFile, audioBuffer);
-			throwIfAborted(signal);
-			return await this.playAudioFile(tempFile, signal);
+			return await this.handleProviderResponse(response, tempFile, fetchSignal, signal, "elevenlabs");
 		} catch (error) {
-			if (isAbortError(error)) {
-				this.debug("tts.elevenlabs.aborted", {});
-				return false;
-			}
-			this.debug("tts.elevenlabs.error", { error: getErrorMessage(error) });
-			return false;
+			return this.handleFetchError(error, "elevenlabs");
 		} finally {
 			fetchSignal.cleanup();
 			await removeTempFile(tempFile);
@@ -584,44 +523,59 @@ class TTSEngineService implements TTSService {
 				headers.authorization = `Bearer ${config.openaiTtsApiKey}`;
 			}
 
-			const response = await fetch(endpoint, {
-				method: "POST",
-				headers,
-				signal: fetchSignal.signal,
-				body: JSON.stringify({
-					model: config.openaiTtsModel,
-					input: text,
-					voice: config.openaiTtsVoice,
-					response_format: format,
-					speed: config.openaiTtsSpeed,
-				}),
-			});
+			const response = await this.fetchJsonPost(endpoint, headers, {
+				model: config.openaiTtsModel,
+				input: text,
+				voice: config.openaiTtsVoice,
+				response_format: format,
+				speed: config.openaiTtsSpeed,
+			}, fetchSignal.signal);
 
-			if (!response.ok) {
-				this.debug("tts.openai.http_error", { status: response.status });
-				return false;
-			}
-
-			throwIfAborted(fetchSignal.signal);
-			const audioBuffer = await readAudioResponseWithLimit(
-				response,
-				MAX_TTS_AUDIO_RESPONSE_BYTES,
-				fetchSignal.signal,
-			);
-			await writeFile(tempFile, audioBuffer);
-			throwIfAborted(signal);
-			return await this.playAudioFile(tempFile, signal);
+			return await this.handleProviderResponse(response, tempFile, fetchSignal, signal, "openai");
 		} catch (error) {
-			if (isAbortError(error)) {
-				this.debug("tts.openai.aborted", {});
-				return false;
-			}
-			this.debug("tts.openai.error", { error: getErrorMessage(error) });
-			return false;
+			return this.handleFetchError(error, "openai");
 		} finally {
 			fetchSignal.cleanup();
 			await removeTempFile(tempFile);
 		}
+	}
+
+	private async downloadAndPlayAudio(response: Response, tempFile: string, fetchSignal: { signal: AbortSignal; cleanup: () => void }, signal?: AbortSignal): Promise<boolean> {
+		throwIfAborted(fetchSignal.signal);
+		const audioBuffer = await readAudioResponseWithLimit(
+			response,
+			MAX_TTS_AUDIO_RESPONSE_BYTES,
+			fetchSignal.signal,
+		);
+		await writeFile(tempFile, audioBuffer);
+		throwIfAborted(signal);
+		return await this.playAudioFile(tempFile, signal);
+	}
+
+	private async fetchJsonPost(endpoint: string, headers: Record<string, string>, body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
+		return fetch(endpoint, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...headers },
+			signal,
+			body: JSON.stringify(body),
+		});
+	}
+
+	private async handleProviderResponse(response: Response, tempFile: string, fetchSignal: { signal: AbortSignal; cleanup: () => void }, signal: AbortSignal | undefined, provider: string): Promise<boolean> {
+		if (!response.ok) {
+			this.debug(`tts.${provider}.http_error`, { status: response.status });
+			return false;
+		}
+		return await this.downloadAndPlayAudio(response, tempFile, fetchSignal, signal);
+	}
+
+	private handleFetchError(error: unknown, provider: string): boolean {
+		if (isAbortError(error)) {
+			this.debug(`tts.${provider}.aborted`, {});
+			return false;
+		}
+		this.debug(`tts.${provider}.error`, { error: getErrorMessage(error) });
+		return false;
 	}
 
 	private async speakWithSapi(text: string, config: TTSConfig, signal?: AbortSignal): Promise<boolean> {
@@ -652,7 +606,7 @@ try {
   if ($synth) { $synth.Dispose() }
 }
 `;
-		const result = await this.runPowerShell(script, config.commandTimeoutMs, signal);
+		const result = await this.runPowerShellCommand(script, config.commandTimeoutMs, signal);
 		return result.code === 0;
 	}
 
@@ -700,7 +654,7 @@ try {
   [void][PiSmartVoiceNotifyTTSWinMM]::mciSendString("close $alias", $null, 0, [IntPtr]::Zero)
 }
 `;
-			const result = await this.runPowerShell(script, this.config.commandTimeoutMs, signal);
+			const result = await this.runPowerShellCommand(script, this.config.commandTimeoutMs, signal);
 			if (result.code === 0) {
 				return true;
 			}
@@ -750,7 +704,7 @@ try {
 		return result.code === 0;
 	}
 
-	private async runPowerShell(script: string, timeoutMs: number, signal?: AbortSignal): Promise<TTSCommandResult> {
+	private async runPowerShellCommand(script: string, timeoutMs: number, signal?: AbortSignal): Promise<TTSCommandResult> {
 		const encodedScript = Buffer.from(script, "utf16le").toString("base64");
 		return await this.runCommand(
 			"powershell.exe",
@@ -786,7 +740,7 @@ try {
 			}
 		}
 
-		return await runSpawnCommand(command, args, timeoutMs, signal);
+		return await runTtsCommand(command, args, timeoutMs, signal);
 	}
 }
 
@@ -808,6 +762,6 @@ export function getTTSService(): TTSService {
 	return sharedTTSService;
 }
 
-export async function speak(text: string, engine: TTSEngine = "auto", options: SpeakOptions = {}): Promise<boolean> {
+export async function speakViaService(text: string, engine: TTSEngine = "auto", options: SpeakOptions = {}): Promise<boolean> {
 	return await getTTSService().speak(text, engine, options);
 }

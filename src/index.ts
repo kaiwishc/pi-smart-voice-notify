@@ -1,7 +1,14 @@
 import type {
+	AgentEndEvent,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
+	InputEvent,
+	SessionShutdownEvent,
+	SessionStartEvent,
+	Theme,
+	ToolCallEvent,
+	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import type { SettingItem } from "@earendil-works/pi-tui";
 import { basename } from "node:path";
@@ -34,6 +41,8 @@ import type { FocusDetectOptions } from "./focus-detect.ts";
 import { createExtensionLogger, getErrorMessage } from "./logging.ts";
 import type { AudioNotificationService } from "./notify-audio.ts";
 import type {
+	ForwardedPermissionRequestEvent,
+	ForwardedPermissionResolutionEvent,
 	PermissionForwardingWatcherConfig,
 	PermissionForwardingWatcherOptions,
 } from "./permission-forwarding-watcher.ts";
@@ -47,6 +56,14 @@ import type {
 } from "./types.ts";
 import type { TTSConfig, TTSService, TTSServiceOptions } from "./types/tts.ts";
 import type { WebhookConfig, WebhookService } from "./webhook.ts";
+import {
+	envBoolean,
+	envInteger,
+	normalizeOptionalString,
+	normalizePermissionForwardingSessionId,
+	readEnvFrom,
+	sanitizeAgentName,
+} from "./shared/index.ts";
 
 type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
 
@@ -112,7 +129,7 @@ function classifyToolResult(
 		return "question";
 	}
 	// Tool errors are often recoverable within the same turn; terminal failures are handled at agent_end.
-	if (!isError && QUESTION_HINTS.some((hint) => normalizedText.includes(hint))) {
+	if (!isError && QUESTION_HINTS.some((hint: string) => normalizedText.includes(hint))) {
 		return "question";
 	}
 
@@ -191,50 +208,6 @@ function queueTask(task: Promise<void>, onError: (error: unknown) => void): void
 	void task.catch(onError);
 }
 
-function envString(...keys: string[]): string {
-	for (const key of keys) {
-		const value = process.env[key];
-		if (typeof value === "string" && value.trim().length > 0) {
-			return value.trim();
-		}
-	}
-	return "";
-}
-
-function envBoolean(defaultValue: boolean, ...keys: string[]): boolean {
-	const raw = envString(...keys).toLowerCase();
-	if (!raw) {
-		return defaultValue;
-	}
-	if (["1", "true", "yes", "on"].includes(raw)) {
-		return true;
-	}
-	if (["0", "false", "no", "off"].includes(raw)) {
-		return false;
-	}
-	return defaultValue;
-}
-
-function envInteger(defaultValue: number, ...keys: string[]): number {
-	const raw = envString(...keys);
-	if (!raw) {
-		return defaultValue;
-	}
-	const parsed = Number.parseInt(raw, 10);
-	return Number.isFinite(parsed) ? parsed : defaultValue;
-}
-
-function normalizePermissionForwardingSessionId(value: unknown): string | null {
-	if (typeof value !== "string") {
-		return null;
-	}
-	const trimmed = value.trim();
-	if (!trimmed || trimmed.toLowerCase() === "unknown") {
-		return null;
-	}
-	return trimmed;
-}
-
 function getPermissionForwardingSessionId(ctx: ExtensionContext): string | null {
 	try {
 		const sessionManager = "sessionManager" in ctx
@@ -244,17 +217,6 @@ function getPermissionForwardingSessionId(ctx: ExtensionContext): string | null 
 	} catch {
 		return null;
 	}
-}
-
-function sanitizeAgentName(value: string | null): string | null {
-	if (!value) {
-		return null;
-	}
-	const normalized = value.replace(/[^a-zA-Z0-9._ -]/g, "").trim().replace(/\s+/g, " ");
-	if (normalized.length === 0) {
-		return null;
-	}
-	return normalized.slice(0, 48);
 }
 
 function forwardedPermissionNotificationText(agentName: string | null, includeAgentName: boolean): string {
@@ -281,8 +243,8 @@ type ReminderKey = string;
 type FocusDetector = (options?: FocusDetectOptions) => Promise<boolean>;
 
 type PermissionForwardingWatcherController = {
-	start(config: PermissionForwardingWatcherConfig): void;
-	updateConfig(config: PermissionForwardingWatcherConfig): void;
+	startWatching(config: PermissionForwardingWatcherConfig): void;
+	restart(config: PermissionForwardingWatcherConfig): void;
 	stop(): void;
 };
 
@@ -299,18 +261,19 @@ function defaultReminderKey(type: NotificationType): ReminderKey {
 	return `${type}:default`;
 }
 
-function permissionReminderKey(toolCallId: string): ReminderKey {
-	const normalizedToolCallId = toolCallId.trim();
-	return normalizedToolCallId.length > 0
-		? `permission:tool-call:${normalizedToolCallId}`
+function permissionReminderKeyFor(prefix: string, identifier: string): ReminderKey {
+	const normalizedIdentifier = identifier.trim();
+	return normalizedIdentifier.length > 0
+		? `permission:${prefix}:${normalizedIdentifier}`
 		: defaultReminderKey("permission");
 }
 
+function permissionReminderKey(toolCallId: string): ReminderKey {
+	return permissionReminderKeyFor("tool-call", toolCallId);
+}
+
 function forwardedPermissionReminderKey(requestId: string): ReminderKey {
-	const normalizedRequestId = requestId.trim();
-	return normalizedRequestId.length > 0
-		? `permission:forwarded:${normalizedRequestId}`
-		: defaultReminderKey("permission");
+	return permissionReminderKeyFor("forwarded", requestId);
 }
 
 const PERMISSION_SYSTEM_EVENT_CHANNEL = "pi-permission-system:permission-request";
@@ -327,14 +290,6 @@ interface PermissionSystemEvent {
 	skillName?: string;
 	path?: string;
 	agentName?: string | null;
-}
-
-function normalizeOptionalString(value: unknown): string | undefined {
-	if (typeof value !== "string") {
-		return undefined;
-	}
-	const trimmed = value.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function readPermissionSystemEvent(value: unknown): PermissionSystemEvent | null {
@@ -381,6 +336,10 @@ export default function smartVoiceNotifyExtension(
 	const readConfig = dependencies.readConfigFromDisk ?? readConfigFromDisk;
 	const createInjectedTTSService = dependencies.initializeTTSService;
 	let config = readConfig();
+	if (!config.enabled) {
+		return;
+	}
+
 	let lastUserActivityAt = Date.now();
 	let hadErrorInTurn = false;
 	let warnedNonWindows = false;
@@ -499,15 +458,15 @@ export default function smartVoiceNotifyExtension(
 			maxRetries: config.webhook.maxRetries,
 			requestTimeoutMs: config.webhook.requestTimeoutMs,
 			discordUsername: config.webhook.username,
-			logger: (message, details = {}) => {
+			logger: (message: string, details: Record<string, unknown> = {}) => {
 				logger.debug(`webhook.${message}`, details);
 			},
 		};
 	};
 	const buildSoundThemeConfig = (): SoundThemeConfig => {
 		const configuredCustomSoundDirectories = config.customSoundDirectories
-			.map((value) => value.trim())
-			.filter((value) => value.length > 0);
+			.map((value: string) => value.trim())
+			.filter((value: string) => value.length > 0);
 		const configuredSoundFiles: NonNullable<SoundThemeConfig["soundFiles"]> = {};
 		const notificationSound = normalizeOptionalString(config.questionSoundFile);
 		const successSound = normalizeOptionalString(config.idleSoundFile);
@@ -568,7 +527,7 @@ export default function smartVoiceNotifyExtension(
 			const { initializeAIMessageService } = await import("./ai-messages.ts");
 			aiMessageService = initializeAIMessageService({
 				config: buildAIMessageConfig(),
-				debugLog: (message, details = {}) => {
+				debugLog: (message: string, details: Record<string, unknown> = {}) => {
 					logger.debug(`ai_messages.${message}`, details);
 				},
 			});
@@ -588,7 +547,7 @@ export default function smartVoiceNotifyExtension(
 		if (!soundThemeService) {
 			const { SoundThemeService: SoundThemeServiceCtor } = await import("./sound-theme.ts");
 			soundThemeService = new SoundThemeServiceCtor({
-				debugLog: (message) => {
+				debugLog: (message: string) => {
 					logger.debug("sound_theme.debug", { message });
 				},
 			});
@@ -606,12 +565,12 @@ export default function smartVoiceNotifyExtension(
 	};
 
 	const clearFocusDetectCacheIfLoaded = (): void => {
-		if (!focusModulePromise) {
+		if (focusModulePromise === null) {
 			return;
 		}
 		void focusModulePromise
-			.then((module) => module.clearFocusDetectCache())
-			.catch((error) => {
+			.then((module: typeof import("./focus-detect.ts")) => module.clearFocusDetectCache())
+			.catch((error: unknown) => {
 				logger.debug("focus.cache_clear_failed", { error: getErrorMessage(error) });
 			});
 	};
@@ -621,14 +580,14 @@ export default function smartVoiceNotifyExtension(
 			return;
 		}
 		void import("./per-project-sound.ts")
-			.then((module) => module.clearProjectSoundCache())
-			.catch((error) => {
+			.then((module: typeof import("./per-project-sound.ts")) => module.clearProjectSoundCache())
+			.catch((error: unknown) => {
 				logger.debug("sound_theme.cache_clear_failed", { error: getErrorMessage(error) });
 			});
 	};
 
 	const permissionForwardingWatcherOptions: PermissionForwardingWatcherOptions = {
-		onRequest: (event) => {
+		onRequest: (event: ForwardedPermissionRequestEvent) => {
 			if (!config.enabled || !config.enablePermissionNotification || !config.enableForwardedPermissionWatcher) {
 				return;
 			}
@@ -657,7 +616,7 @@ export default function smartVoiceNotifyExtension(
 				customMessage,
 			});
 		},
-		onResolve: (event) => {
+		onResolve: (event: ForwardedPermissionResolutionEvent) => {
 			logger.debug("permission_forwarding.request_resolved", {
 				requestId: event.requestId,
 				source: event.source,
@@ -681,7 +640,7 @@ export default function smartVoiceNotifyExtension(
 				},
 			);
 		},
-		debugLog: (event, details = {}) => {
+		debugLog: (event: string, details: Record<string, unknown> = {}) => {
 			logger.debug(event, details);
 		},
 	};
@@ -717,7 +676,7 @@ export default function smartVoiceNotifyExtension(
 		const watcher = watcherConfig.enabled
 			? await getPermissionForwardingWatcher()
 			: permissionForwardingWatcher;
-		watcher?.start(watcherConfig);
+		watcher?.startWatching(watcherConfig);
 	};
 
 	const refreshIntegratedServiceConfig = (): void => {
@@ -728,8 +687,8 @@ export default function smartVoiceNotifyExtension(
 				debug: logger.debug,
 			})
 			: null;
-		aiMessageService?.updateConfig(buildAIMessageConfig());
-		webhookService?.updateConfig(buildWebhookConfig());
+		aiMessageService?.updateAIMessageConfig(buildAIMessageConfig());
+		webhookService?.applyWebhookConfig(buildWebhookConfig());
 	};
 
 	const rememberScopedToolCallId = (toolCallId: string, seenToolCallIds: Set<string>): boolean => {
@@ -750,7 +709,7 @@ export default function smartVoiceNotifyExtension(
 
 	const refreshQuestionToolAvailability = (): void => {
 		try {
-			questionToolAvailable = pi.getAllTools().some((tool) => tool.name.toLowerCase() === "question");
+			questionToolAvailable = pi.getAllTools().some((tool: { name: string }) => tool.name.toLowerCase() === "question");
 		} catch {
 			questionToolAvailable = false;
 		}
@@ -893,7 +852,7 @@ export default function smartVoiceNotifyExtension(
 				debug: config.debugLog,
 				cacheTtlMs: config.focusCacheTtlMs,
 				timeoutMs: focusTimeoutMs,
-				logger: (message, details = {}) => {
+				logger: (message: string, details: Record<string, unknown> = {}) => {
 					logger.debug("focus.detect", {
 						message,
 						...details,
@@ -960,7 +919,7 @@ export default function smartVoiceNotifyExtension(
 		if (process.platform === "linux") {
 			const { getIdleTime, wakeMonitor: wakeLinuxMonitor } = await import("./linux.ts");
 			const idleSeconds = await getIdleTime({
-				debugLog: (message) => {
+				debugLog: (message: string) => {
 					logger.debug("linux.idle", { message });
 				},
 			});
@@ -973,7 +932,7 @@ export default function smartVoiceNotifyExtension(
 				return;
 			}
 			await wakeLinuxMonitor({
-				debugLog: (message) => {
+				debugLog: (message: string) => {
 					logger.debug("linux.wake", { message });
 				},
 			});
@@ -981,7 +940,7 @@ export default function smartVoiceNotifyExtension(
 		}
 
 		const service = await getAudioService();
-		await service.wakeMonitor();
+		await service.wakeSystemMonitor();
 	};
 
 	const playNotificationSound = async (type: NotificationType): Promise<boolean> => {
@@ -1035,7 +994,7 @@ export default function smartVoiceNotifyExtension(
 		if (isWindows()) {
 			try {
 				const audio = await getAudioService();
-				await audio.speakWithSapi(message, signal);
+				await audio.speakWithSapiVoice(message, signal);
 				return !signal?.aborted;
 			} catch (error) {
 				logger.debug("tts.sapi_fallback_failed", {
@@ -1220,7 +1179,7 @@ export default function smartVoiceNotifyExtension(
 							return;
 						}
 
-						const playbackHandle = reminderPlayback.start(reminderCheckpoint, type, followUpCount + 1);
+						const playbackHandle = reminderPlayback.startPlayback(reminderCheckpoint, type, followUpCount + 1);
 						try {
 							if (!reminderPlayback.isCurrent(playbackHandle, scheduledAt, lastUserActivityAt)) {
 								logger.debug("reminder.playback_skipped", {
@@ -1422,17 +1381,21 @@ export default function smartVoiceNotifyExtension(
 		logger.debug("agent.error_notification.cancelled", { reason });
 	};
 
+	const skipAgentErrorNotification = (reason: string, outcome: AgentEndOutcome, stage: string): void => {
+		logger.debug("agent.error_notification.skipped", {
+			reason,
+			errorReason: outcome.reason,
+			stage,
+		});
+	};
+
 	const scheduleAgentErrorNotification = (ctx: ExtensionContext, outcome: AgentEndOutcome): void => {
 		cancelPendingAgentErrorNotification("rescheduled");
 		if (!config.enabled || !config.enableErrorNotification) {
 			return;
 		}
 		if (hasPendingAgentMessages(ctx)) {
-			logger.debug("agent.error_notification.skipped", {
-				reason: "pending_messages",
-				errorReason: outcome.reason,
-				stage: "schedule",
-			});
+			skipAgentErrorNotification("pending_messages", outcome, "schedule");
 			return;
 		}
 
@@ -1450,11 +1413,7 @@ export default function smartVoiceNotifyExtension(
 			}
 
 			if (hasPendingAgentMessages(ctx)) {
-				logger.debug("agent.error_notification.skipped", {
-					reason: "pending_messages",
-					errorReason: outcome.reason,
-					stage: "fire",
-				});
+				skipAgentErrorNotification("pending_messages", outcome, "fire");
 				return;
 			}
 
@@ -1530,6 +1489,13 @@ export default function smartVoiceNotifyExtension(
 			return;
 		}
 
+		// A new "waiting" event invalidates any prior resolution for this key.
+		// Without this, a permission request reusing the same reminder key
+		// (e.g. the same toolCallId across retries) would be silently suppressed
+		// by a stale entry left in resolvedPermissionBatchKeys from a previous
+		// resolution cycle.
+		resolvedPermissionBatchKeys.delete(entry.reminderKey);
+
 		permissionBatchContext = ctx;
 		pendingPermissionBatch.set(entry.reminderKey, entry);
 
@@ -1566,7 +1532,7 @@ export default function smartVoiceNotifyExtension(
 					}
 
 					const activeBatch = batch.filter(
-						(batchedEntry) => !resolvedPermissionBatchKeys.has(batchedEntry.reminderKey),
+						(batchedEntry: PermissionBatchEntry) => !resolvedPermissionBatchKeys.has(batchedEntry.reminderKey),
 					);
 					if (activeBatch.length === 0) {
 						return;
@@ -1601,6 +1567,14 @@ export default function smartVoiceNotifyExtension(
 		permissionBatchTimeout.unref?.();
 	};
 
+	const permissionEventFields = (event: PermissionSystemEvent): Record<string, unknown> => ({
+		requestId: event.requestId,
+		toolCallId: event.toolCallId ?? null,
+		toolName: event.toolName ?? null,
+		skillName: event.skillName ?? null,
+		source: event.source,
+	});
+
 	pi.events.on(PERMISSION_SYSTEM_EVENT_CHANNEL, (payload: unknown) => {
 		const event = readPermissionSystemEvent(payload);
 		if (!event) {
@@ -1624,13 +1598,7 @@ export default function smartVoiceNotifyExtension(
 			if (event.toolCallId) {
 				pendingPermissionToolCallIds.add(event.toolCallId);
 			}
-			logger.debug("permission_system.wait_detected", {
-				requestId: event.requestId,
-				toolCallId: event.toolCallId ?? null,
-				toolName: event.toolName ?? null,
-				skillName: event.skillName ?? null,
-				source: event.source,
-			});
+			logger.debug("permission_system.wait_detected", permissionEventFields(event));
 			queuePermissionNotification(activeSessionContext, {
 				reminderKey,
 				reason: event.message,
@@ -1642,20 +1610,12 @@ export default function smartVoiceNotifyExtension(
 			pendingPermissionToolCallIds.delete(event.toolCallId);
 		}
 		removePermissionFromBatch(reminderKey, "permission_system_wait_resolved", {
-			requestId: event.requestId,
-			toolCallId: event.toolCallId ?? null,
-			toolName: event.toolName ?? null,
-			skillName: event.skillName ?? null,
+			...permissionEventFields(event),
 			state: event.state,
-			source: event.source,
 		});
 		cancelReminderActivityForKey(reminderKey, "permission_system_wait_resolved", {
-			requestId: event.requestId,
-			toolCallId: event.toolCallId ?? null,
-			toolName: event.toolName ?? null,
-			skillName: event.skillName ?? null,
+			...permissionEventFields(event),
 			state: event.state,
-			source: event.source,
 		});
 	});
 
@@ -1688,7 +1648,7 @@ export default function smartVoiceNotifyExtension(
 
 	const buildSettings = (draft: VoiceNotifyConfig): SettingItem[] => {
 		const volumeValues = Array.from(new Set(["0", "25", "50", "75", "85", "100", String(draft.volume)])).sort(
-			(a, b) => Number(a) - Number(b),
+			(a: string, b: string) => Number(a) - Number(b),
 		);
 
 		return [
@@ -1729,13 +1689,13 @@ export default function smartVoiceNotifyExtension(
 		const { ZellijModal, ZellijSettingsModal } = await import("./zellij-modal.ts");
 
 		await ctx.ui.custom<void>(
-			(tui, theme, _keybindings, done) => {
+			(tui: { requestRender: () => void }, theme: Theme, _keybindings: unknown, done: (result: void) => void) => {
 				const settingsModal = new ZellijSettingsModal(
 					{
 						title: "Voice Notify Settings",
 						description,
 						settings: items,
-						onChange: (id, newValue) => {
+						onChange: (id: string, newValue: string) => {
 							const previousConfig = config;
 							applySetting(draft, id, newValue);
 							config = normalizeConfig(draft);
@@ -1780,10 +1740,10 @@ export default function smartVoiceNotifyExtension(
 						return modal.renderModal(width).lines;
 					},
 					invalidate(): void {
-						modal.invalidate();
+						modal.invalidateCaches();
 					},
 					handleInput(data: string): void {
-						modal.handleInput(data);
+						modal.handleInputEvent(data);
 						tui.requestRender();
 					},
 				};
@@ -1859,12 +1819,12 @@ export default function smartVoiceNotifyExtension(
 
 	pi.registerCommand("voice-notify", {
 		description: "Configure Windows smart voice notifications",
-		handler: async (args, ctx) => {
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			await runCommand(args, ctx);
 		},
 	});
 
-	pi.on("resources_discover", (event, _ctx) => {
+	pi.on("resources_discover", (event: { reason?: string }, _ctx: ExtensionContext) => {
 		if (event.reason === "reload") {
 			// Clear caches on reload
 			clearFocusDetectCacheIfLoaded();
@@ -1873,7 +1833,7 @@ export default function smartVoiceNotifyExtension(
 		}
 	});
 
-	pi.on("session_start", async (event, ctx) => {
+	pi.on("session_start", async (event: SessionStartEvent, ctx: ExtensionContext) => {
 		const reason = getSessionStartReason(event);
 		const previousSessionFile = getPreviousSessionFile(event);
 
@@ -1926,10 +1886,10 @@ export default function smartVoiceNotifyExtension(
 		});
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", async (_event: SessionShutdownEvent, ctx: ExtensionContext) => {
 		shutdownRequested = true;
 		cancelPendingAgentErrorNotification("session_shutdown");
-		if (shutdownPromise) {
+		if (shutdownPromise !== null) {
 			await shutdownPromise;
 			return;
 		}
@@ -1964,7 +1924,7 @@ export default function smartVoiceNotifyExtension(
 		await shutdownPromise;
 	});
 
-	pi.on("input", async (event) => {
+	pi.on("input", async (event: InputEvent) => {
 		if (event.source !== "extension") {
 			lastUserActivityAt = Date.now();
 			cancelPendingAgentErrorNotification("user_input");
@@ -1982,18 +1942,18 @@ export default function smartVoiceNotifyExtension(
 		logger.debug("agent.start", {});
 	});
 
-	pi.on("tool_call", async (_event, ctx) => {
+	pi.on("tool_call", async (_event: ToolCallEvent, ctx: ExtensionContext) => {
 		activeSessionContext = ctx;
 		return {};
 	});
 
-	pi.on("tool_execution_start", async (event) => {
+	pi.on("tool_execution_start", async (event: { toolCallId?: string; toolName?: string }) => {
 		resolvePermissionInteraction(event.toolCallId, "tool_execution_start", {
 			toolName: event.toolName,
 		});
 	});
 
-	pi.on("tool_result", async (event, ctx) => {
+	pi.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
 		activeSessionContext = ctx;
 		resolvePermissionInteraction(event.toolCallId, "tool_result", {
 			toolName: event.toolName,
@@ -2028,7 +1988,7 @@ export default function smartVoiceNotifyExtension(
 		});
 	});
 
-	pi.on("agent_end", async (event, ctx) => {
+	pi.on("agent_end", async (event: AgentEndEvent, ctx: ExtensionContext) => {
 		activeSessionContext = ctx;
 		const outcome = readAgentEndOutcome(event);
 		if (outcome.status === "error") {

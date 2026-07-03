@@ -247,11 +247,11 @@ export interface ZellijModalRenderOutput {
  */
 export interface ZellijModalContentRenderer {
 	/** Render content into lines for the given width. */
-	render(width: number): string[];
+	renderContent(width: number): string[];
 	/** Invalidate internal caches. */
-	invalidate(): void;
+	invalidateCaches(): void;
 	/** Optional input handler. */
-	handleInput?(data: string): void;
+	handleInputEvent?(data: string): void;
 }
 
 /**
@@ -287,9 +287,9 @@ export interface ZellijModalTheme {
  */
 export function resolveColor(color: PaletteColor): { fg: string; bg: string } {
 	if (color.type === "rgb") {
-		const r = clampInt(color.r, 0, 255);
-		const g = clampInt(color.g, 0, 255);
-		const b = clampInt(color.b, 0, 255);
+		const r = clampBounded(color.r, 0, 255);
+		const g = clampBounded(color.g, 0, 255);
+		const b = clampBounded(color.b, 0, 255);
 		return {
 			fg: `\x1b[38;2;${r};${g};${b}m`,
 			bg: `\x1b[48;2;${r};${g};${b}m`,
@@ -297,7 +297,7 @@ export function resolveColor(color: PaletteColor): { fg: string; bg: string } {
 	}
 
 	if (color.type === "8bit") {
-		const code = clampInt(color.code, 0, 255);
+		const code = clampBounded(color.code, 0, 255);
 		return {
 			fg: `\x1b[38;5;${code}m`,
 			bg: `\x1b[48;5;${code}m`,
@@ -442,14 +442,31 @@ export class ZellijModalFrame {
 		};
 	}
 
-	private renderTitleBar(width: number, palette: ZellijColorPalette): string {
+	private borderSetupOrZero(width: number, palette: ZellijColorPalette, leftCorner: string, rightCorner: string): { innerWidth: number; borderPaint: (text: string) => string } | string {
 		const innerWidth = Math.max(0, width - 2);
 		const borderColor = this.config.focused ? palette.borderFocused : palette.borderUnfocused;
 		const borderPaint = (text: string) => this.theme.colorizeForeground(borderColor, text);
-
 		if (innerWidth === 0) {
-			return `${borderPaint(this.borders.topLeft)}${borderPaint(this.borders.topRight)}`;
+			return `${borderPaint(leftCorner)}${borderPaint(rightCorner)}`;
 		}
+		return { innerWidth, borderPaint };
+	}
+
+	private borderSetup(width: number, palette: ZellijColorPalette): { innerWidth: number; borderPaint: (text: string) => string } {
+		const result = this.borderSetupOrZero(width, palette, "", "");
+		return typeof result === "string" ? { innerWidth: 0, borderPaint: () => "" } : result;
+	}
+
+	private renderZeroWidth(borderPaint: (text: string) => string, left: string, right: string): string {
+		return `${borderPaint(left)}${borderPaint(right)}`;
+	}
+
+	private renderTitleBar(width: number, palette: ZellijColorPalette): string {
+		const setup = this.borderSetupOrZero(width, palette, this.borders.topLeft, this.borders.topRight);
+		if (typeof setup === "string") {
+			return setup;
+		}
+		const { innerWidth, borderPaint } = setup;
 
 		const segments = this.positionTitleSegments(innerWidth);
 		let inner = "";
@@ -472,13 +489,11 @@ export class ZellijModalFrame {
 	}
 
 	private renderBottomLine(width: number, palette: ZellijColorPalette): string {
-		const innerWidth = Math.max(0, width - 2);
-		const borderColor = this.config.focused ? palette.borderFocused : palette.borderUnfocused;
-		const borderPaint = (text: string) => this.theme.colorizeForeground(borderColor, text);
-
-		if (innerWidth === 0) {
-			return `${borderPaint(this.borders.bottomLeft)}${borderPaint(this.borders.bottomRight)}`;
+		const setup = this.borderSetupOrZero(width, palette, this.borders.bottomLeft, this.borders.bottomRight);
+		if (typeof setup === "string") {
+			return setup;
 		}
+		const { innerWidth, borderPaint } = setup;
 
 		const helpText = this.resolveHelpText(Math.max(0, innerWidth - 3));
 		if (!helpText) {
@@ -542,7 +557,7 @@ export class ZellijModalFrame {
 				const centerWidth = visibleWidth(centerText);
 				if (centerText && centerWidth > 0) {
 					const centeredStart = Math.floor((innerWidth - centerWidth) / 2);
-					const start = clampInt(centeredStart, leftLimit, Math.max(leftLimit, rightStart - centerWidth));
+					const start = clampBounded(centeredStart, leftLimit, Math.max(leftLimit, rightStart - centerWidth));
 					placements.push({
 						start,
 						end: start + centerWidth,
@@ -658,7 +673,7 @@ export class ZellijModal implements ZellijModalComponent {
 	private palette: ZellijColorPalette;
 
 	constructor(content: ZellijModalContentRenderer, config: ZellijModalConfigPartial = {}, theme?: Theme) {
-		if (!content || typeof content.render !== "function") {
+		if (!content || typeof content.renderContent !== "function") {
 			throw new Error("ZellijModal requires a valid content renderer.");
 		}
 
@@ -668,31 +683,35 @@ export class ZellijModal implements ZellijModalComponent {
 		this.frame = new ZellijModalFrame({ ...this.config, palette: this.palette });
 	}
 
+	private applyPadding(lines: string[], paddedWidth: number): void {
+		for (let i = 0; i < this.config.padding; i++) {
+			lines.push(" ".repeat(paddedWidth));
+		}
+	}
+
+	private pushContentLines(lines: string[], normalized: string[], contentWidth: number, sidePadding: string): void {
+		for (const line of normalized) {
+			const fitted = truncateToWidth(line, contentWidth, "", true);
+			lines.push(`${sidePadding}${fitted}${sidePadding}`);
+		}
+	}
+
 	/**
 	 * Render content only (without frame).
 	 */
-	render(width: number): string[] {
+	renderContent(width: number): string[] {
 		const contentWidth = Math.max(1, width - 2 - this.config.padding * 2);
 		const paddedWidth = contentWidth + this.config.padding * 2;
 		const sidePadding = " ".repeat(this.config.padding);
 		const lines: string[] = [];
 
 		try {
-			const rawLines = this.content.render(contentWidth);
+			const rawLines = this.content.renderContent(contentWidth);
 			const normalized = rawLines.length > 0 ? rawLines : [""];
 
-			for (let i = 0; i < this.config.padding; i++) {
-				lines.push(" ".repeat(paddedWidth));
-			}
-
-			for (const line of normalized) {
-				const fitted = truncateToWidth(line, contentWidth, "", true);
-				lines.push(`${sidePadding}${fitted}${sidePadding}`);
-			}
-
-			for (let i = 0; i < this.config.padding; i++) {
-				lines.push(" ".repeat(paddedWidth));
-			}
+			this.applyPadding(lines, paddedWidth);
+			this.pushContentLines(lines, normalized, contentWidth, sidePadding);
+			this.applyPadding(lines, paddedWidth);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const safe = truncateToWidth(` Render error: ${message} `, paddedWidth, "…", true);
@@ -707,22 +726,22 @@ export class ZellijModal implements ZellijModalComponent {
 	 */
 	renderModal(width: number): ZellijModalRenderOutput {
 		const frameWidth = this.resolveModalWidth(width);
-		const contentLines = this.render(frameWidth);
+		const contentLines = this.renderContent(frameWidth);
 		return this.frame.renderFrame(contentLines, frameWidth, this.palette);
 	}
 
 	/**
 	 * Invalidate child renderer state.
 	 */
-	invalidate(): void {
-		this.content.invalidate();
+	invalidateCaches(): void {
+		this.content.invalidateCaches();
 	}
 
 	/**
 	 * Delegate input to child renderer.
 	 */
-	handleInput(data: string): void {
-		this.content.handleInput?.(data);
+	handleInputEvent(data: string): void {
+		this.content.handleInputEvent?.(data);
 	}
 
 	/**
@@ -739,7 +758,7 @@ export class ZellijModal implements ZellijModalComponent {
 	 * Dispose modal resources.
 	 */
 	dispose(): void {
-		this.content.invalidate();
+		this.content.invalidateCaches();
 	}
 
 	private buildConfig(partial: ZellijModalConfigPartial): ZellijModalConfig {
@@ -850,7 +869,7 @@ export class ZellijSettingsModal implements ZellijModalContentRenderer {
 	/**
 	 * Render settings modal content.
 	 */
-	render(width: number): string[] {
+	renderContent(width: number): string[] {
 		const safeWidth = Math.max(1, width);
 		try {
 			return this.container.render(safeWidth);
@@ -863,14 +882,14 @@ export class ZellijSettingsModal implements ZellijModalContentRenderer {
 	/**
 	 * Invalidate internal caches.
 	 */
-	invalidate(): void {
+	invalidateCaches(): void {
 		this.container.invalidate();
 	}
 
 	/**
 	 * Forward key input to SettingsList.
 	 */
-	handleInput(data: string): void {
+	handleInputEvent(data: string): void {
 		if (isEnterActivationInput(data)) {
 			return;
 		}
@@ -915,9 +934,9 @@ function parseAnsiForegroundColor(ansi: string): PaletteColor | null {
 		const [, r, g, b] = rgbMatch;
 		return {
 			type: "rgb",
-			r: clampInt(Number.parseInt(r ?? "0", 10), 0, 255),
-			g: clampInt(Number.parseInt(g ?? "0", 10), 0, 255),
-			b: clampInt(Number.parseInt(b ?? "0", 10), 0, 255),
+			r: clampBounded(Number.parseInt(r ?? "0", 10), 0, 255),
+			g: clampBounded(Number.parseInt(g ?? "0", 10), 0, 255),
+			b: clampBounded(Number.parseInt(b ?? "0", 10), 0, 255),
 		};
 	}
 
@@ -926,40 +945,47 @@ function parseAnsiForegroundColor(ansi: string): PaletteColor | null {
 		const [, code] = bit8Match;
 		return {
 			type: "8bit",
-			code: clampInt(Number.parseInt(code ?? "255", 10), 0, 255),
+			code: clampBounded(Number.parseInt(code ?? "255", 10), 0, 255),
 		};
 	}
 
 	return null;
 }
 
-function truncateStart(text: string, maxWidth: number): string {
+function truncateGuard(text: string, maxWidth: number): string | null {
 	if (visibleWidth(text) <= maxWidth) {
 		return text;
 	}
 	if (maxWidth <= 1) {
 		return "…".slice(0, maxWidth);
 	}
+	return null;
+}
+
+function truncateStart(text: string, maxWidth: number): string {
+	return truncateGuard(text, maxWidth) ?? (() => {
+		const suffix = buildReverseSuffix(text, maxWidth - 1);
+		return `…${truncateToWidth(suffix, Math.max(0, maxWidth - 1), "")}`;
+	})();
+}
+
+function buildReverseSuffix(text: string, maxChars: number): string {
 	const chars = Array.from(text);
 	let current = "";
 	for (let index = chars.length - 1; index >= 0; index--) {
 		const candidate = `${chars[index]}${current}`;
-		if (visibleWidth(candidate) >= maxWidth - 1) {
+		if (visibleWidth(candidate) >= maxChars) {
 			current = candidate;
 			break;
 		}
 		current = candidate;
 	}
-	return `…${truncateToWidth(current, Math.max(0, maxWidth - 1), "")}`;
+	return current;
 }
 
 function truncateMiddle(text: string, maxWidth: number): string {
-	if (visibleWidth(text) <= maxWidth) {
-		return text;
-	}
-	if (maxWidth <= 1) {
-		return "…".slice(0, maxWidth);
-	}
+	const early = truncateGuard(text, maxWidth);
+	if (early !== null) return early;
 
 	const headTarget = Math.floor((maxWidth - 1) / 2);
 	const tailTarget = Math.max(0, maxWidth - 1 - headTarget);
@@ -981,7 +1007,7 @@ function truncateMiddle(text: string, maxWidth: number): string {
 	return `${head}…${tail}`;
 }
 
-function clampInt(value: number, min: number, max: number): number {
+function clampBounded(value: number, min: number, max: number): number {
 	if (Number.isNaN(value) || !Number.isFinite(value)) {
 		return min;
 	}

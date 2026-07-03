@@ -4,6 +4,7 @@ import { Agent, type Dispatcher } from "undici";
 
 import type { NotificationType } from "./types.ts";
 import { getErrorMessage } from "./logging.ts";
+import { parseEnvBoolean } from "./shared/index.ts";
 
 export type WebhookEventType = NotificationType | (string & {});
 export type WebhookProvider = "discord" | "generic";
@@ -124,8 +125,8 @@ const DISCORD_HOSTS = new Set(["discord.com", "discordapp.com", "ptb.discord.com
 async function defaultDnsLookup(hostname: string): Promise<Array<{ address: string; family: 4 | 6 }>> {
 	const addresses = await lookupDns(hostname, { all: true, verbatim: true });
 	return addresses
-		.filter((entry): entry is { address: string; family: 4 | 6 } => entry.family === 4 || entry.family === 6)
-		.map((entry) => ({ address: entry.address, family: entry.family }));
+		.filter((entry: { address: string; family: number }): entry is { address: string; family: 4 | 6 } => entry.family === 4 || entry.family === 6)
+		.map((entry: { address: string; family: 4 | 6 }) => ({ address: entry.address, family: entry.family }));
 }
 
 function defaultLogger(_message: string, _details: Record<string, unknown> = {}): void {
@@ -168,20 +169,6 @@ function delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 
 		signal?.addEventListener("abort", onAbort, { once: true });
 	});
-}
-
-function parseBoolean(value: string | undefined): boolean | undefined {
-	if (!value) {
-		return undefined;
-	}
-	const normalized = value.trim().toLowerCase();
-	if (["1", "true", "yes", "on"].includes(normalized)) {
-		return true;
-	}
-	if (["0", "false", "no", "off"].includes(normalized)) {
-		return false;
-	}
-	return undefined;
 }
 
 function parseInteger(value: string | undefined): number | undefined {
@@ -411,12 +398,12 @@ function parseEnvConfig(env: NodeJS.ProcessEnv): WebhookConfig {
 	const eventAllowList = eventListRaw
 		? eventListRaw
 				.split(",")
-				.map((value) => value.trim())
-				.filter((value) => value.length > 0)
+				.map((value: string) => value.trim())
+				.filter((value: string) => value.length > 0)
 		: [];
 
 	const enabled =
-		parseBoolean(env.PI_SMART_NOTIFY_WEBHOOK_ENABLED) ?? parseBoolean(env.WEBHOOK_ENABLED) ?? false;
+		parseEnvBoolean(env.PI_SMART_NOTIFY_WEBHOOK_ENABLED) ?? parseEnvBoolean(env.WEBHOOK_ENABLED) ?? false;
 
 	return {
 		enabled,
@@ -648,7 +635,7 @@ export class WebhookService {
 		this.config = resolveConfig(this.sourceConfig);
 	}
 
-	public updateConfig(config: WebhookConfig): void {
+	public applyWebhookConfig(config: WebhookConfig): void {
 		this.sourceConfig = {
 			...this.sourceConfig,
 			...config,
@@ -743,16 +730,20 @@ export class WebhookService {
 		}
 	}
 
-	private markRequest(target: ResolvedWebhookTarget): void {
+	private getRateLimitState(target: ResolvedWebhookTarget): { key: string; existing: RateLimitState } {
 		const key = this.targetKey(target);
 		const existing = this.rateLimitState.get(key) ?? { lastSentAt: 0, nextAllowedAt: 0 };
+		return { key, existing };
+	}
+
+	private markRequest(target: ResolvedWebhookTarget): void {
+		const { key, existing } = this.getRateLimitState(target);
 		existing.lastSentAt = Date.now();
 		this.rateLimitState.set(key, existing);
 	}
 
 	private markRateLimited(target: ResolvedWebhookTarget, retryAfterMs: number): void {
-		const key = this.targetKey(target);
-		const existing = this.rateLimitState.get(key) ?? { lastSentAt: 0, nextAllowedAt: 0 };
+		const { key, existing } = this.getRateLimitState(target);
 		existing.nextAllowedAt = Date.now() + Math.max(0, retryAfterMs);
 		this.rateLimitState.set(key, existing);
 	}

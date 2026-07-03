@@ -89,7 +89,7 @@ export interface TTSAvailability {
 
 export interface TTSService {
 	speak(text: string, engine?: TTSEngine, options?: SpeakOptions): Promise<boolean>;
-	detectAvailableEngines(): Promise<TTSAvailability>;
+	refreshEngineAvailability(): Promise<TTSAvailability>;
 	getAvailableEngines(): Readonly<TTSAvailability>;
 	getConfig(): Readonly<TTSConfig>;
 }
