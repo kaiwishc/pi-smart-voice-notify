@@ -1,20 +1,15 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 
-// config-store resolves its global config path once at module load, from
-// PI_CODING_AGENT_DIR. Point it at a throwaway, empty dir *before* importing so
-// that no global config exists and the real user global config is never touched.
-// The dynamic import below runs after this assignment (static imports would be
-// hoisted ahead of it). Mirrors the isolation technique in
-// config-store-no-global.test.ts.
-const agentDir = mkdtempSync(join(tmpdir(), "svn-agent-env-"));
-process.env.PI_CODING_AGENT_DIR = agentDir;
-
-const { readConfigFromDisk, resolveProjectConfigPath, CONFIG_PATH } = await import(
-	"../src/config-store.ts"
+// Reuse the shared config-store test fixture so the agent-dir isolation,
+// dynamic import, and writeProjectConfig helper are defined in one place.
+// config-store-env-override needs the same isolation as config-store-no-global;
+// the fixture's dynamic import runs in this process after the env assignment.
+const { readConfigFromDisk, writeProjectConfig, assertIsolatedAgentDir } = await import(
+	"./config-store-fixture.ts"
 );
 
 // aiMessages.endpoint is the canonical nested key for the AI endpoint
@@ -24,17 +19,8 @@ const { readConfigFromDisk, resolveProjectConfigPath, CONFIG_PATH } = await impo
 const PROJECT_ENDPOINT = "https://from-project.example/v1";
 const ENV_ENDPOINT = "https://from-env.example/v1";
 
-function writeProjectConfig(projectRoot: string, record: Record<string, unknown>): string {
-	const projectConfigPath = resolveProjectConfigPath(projectRoot);
-	mkdirSync(dirname(projectConfigPath), { recursive: true });
-	writeFileSync(projectConfigPath, JSON.stringify(record), "utf-8");
-	return projectConfigPath;
-}
-
 test("project-level nested config wins over defaults when no env override is set (project > default)", () => {
-	// Guard: confirm this process really resolved the isolated, empty agent dir.
-	assert.ok(CONFIG_PATH.startsWith(agentDir), `expected isolated CONFIG_PATH, got ${CONFIG_PATH}`);
-	assert.equal(existsSync(CONFIG_PATH), false, "global config must be absent at the start");
+	assertIsolatedAgentDir();
 
 	const projectRoot = mkdtempSync(join(tmpdir(), "svn-repo-noenv-"));
 	writeProjectConfig(projectRoot, { aiMessages: { endpoint: PROJECT_ENDPOINT } });

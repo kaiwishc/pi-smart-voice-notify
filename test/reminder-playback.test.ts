@@ -3,11 +3,25 @@ import test from "node:test";
 
 import { ReminderPlaybackController } from "../src/reminder-playback.ts";
 
-test("ReminderPlaybackController cancels only the matching reminder flow", () => {
+/**
+ * Shared setup for the two-permission-scope tests: creates a controller with
+ * first/second checkpoints and starts playback on the first.
+ */
+function createTwoPermissionScopes(): {
+	controller: ReminderPlaybackController;
+	firstCheckpoint: ReturnType<ReminderPlaybackController["captureCheckpoint"]>;
+	secondCheckpoint: ReturnType<ReminderPlaybackController["captureCheckpoint"]>;
+	firstHandle: ReturnType<ReminderPlaybackController["startPlayback"]>;
+} {
 	const controller = new ReminderPlaybackController();
 	const firstCheckpoint = controller.captureCheckpoint("permission:tool-call:first");
 	const secondCheckpoint = controller.captureCheckpoint("permission:tool-call:second");
-	const firstHandle = controller.start(firstCheckpoint, "permission", 1);
+	const firstHandle = controller.startPlayback(firstCheckpoint, "permission", 1);
+	return { controller, firstCheckpoint, secondCheckpoint, firstHandle };
+}
+
+test("ReminderPlaybackController cancels only the matching reminder flow", () => {
+	const { controller, firstCheckpoint, secondCheckpoint, firstHandle } = createTwoPermissionScopes();
 
 	assert.equal(controller.isCurrent(firstCheckpoint, 1_000, 1_000), true);
 	assert.equal(controller.isCurrent(secondCheckpoint, 1_000, 1_000), true);
@@ -24,11 +38,8 @@ test("ReminderPlaybackController cancels only the matching reminder flow", () =>
 });
 
 test("ReminderPlaybackController aborts superseded playback handles without invalidating other reminders", () => {
-	const controller = new ReminderPlaybackController();
-	const firstCheckpoint = controller.captureCheckpoint("permission:tool-call:first");
-	const secondCheckpoint = controller.captureCheckpoint("permission:tool-call:second");
-	const firstHandle = controller.start(firstCheckpoint, "permission", 1);
-	const secondHandle = controller.start(secondCheckpoint, "permission", 2);
+	const { controller, secondCheckpoint, firstHandle } = createTwoPermissionScopes();
+	const secondHandle = controller.startPlayback(secondCheckpoint, "permission", 2);
 
 	assert.equal(firstHandle.signal.aborted, true);
 	assert.equal(secondHandle.signal.aborted, false);
@@ -46,7 +57,7 @@ test("ReminderPlaybackController cancelAll invalidates every reminder scope", ()
 	const controller = new ReminderPlaybackController();
 	const permissionCheckpoint = controller.captureCheckpoint("permission:tool-call:first");
 	const questionCheckpoint = controller.captureCheckpoint("question:default");
-	const activeHandle = controller.start(permissionCheckpoint, "permission", 1);
+	const activeHandle = controller.startPlayback(permissionCheckpoint, "permission", 1);
 
 	const cancelled = controller.cancelAll();
 	assert.deepEqual(cancelled, {

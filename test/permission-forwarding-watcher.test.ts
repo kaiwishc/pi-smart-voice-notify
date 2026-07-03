@@ -72,11 +72,15 @@ function writeRequest(
 	return filePath;
 }
 
-function createWatcherHarness(rootDir: string): {
+interface WatcherHarness {
+	rootDir: string;
 	requests: ForwardedPermissionRequestEvent[];
 	resolutions: ForwardedPermissionResolutionEvent[];
 	watcher: PermissionForwardingWatcher;
-} {
+	cleanup: () => void;
+}
+
+function createWatcherHarness(rootDir: string): WatcherHarness {
 	const requests: ForwardedPermissionRequestEvent[] = [];
 	const resolutions: ForwardedPermissionResolutionEvent[] = [];
 	const watcher = new PermissionForwardingWatcher({
@@ -90,7 +94,51 @@ function createWatcherHarness(rootDir: string): {
 		debugLog: () => {
 		},
 	});
-	return { requests, resolutions, watcher };
+	const cleanup = (): void => {
+		watcher.stop();
+		rmSync(rootDir, { recursive: true, force: true });
+	};
+	return { rootDir, requests, resolutions, watcher, cleanup };
+}
+
+/**
+ * Stop a watcher and remove its temp root dir. Used by tests that create a
+ * custom watcher (with a debugLog handler) instead of createWatcherHarness.
+ */
+function cleanupForwardingRoot(watcher: { stop: () => void }, rootDir: string): void {
+	watcher.stop();
+	rmSync(rootDir, { recursive: true, force: true });
+}
+
+/**
+ * Shared config object for watcher startWatching calls in fallback and
+ * resolution tests.
+ */
+function watcherConfig(sessionId: string): {
+	enabled: true;
+	watchLegacyPath: false;
+	targetSessionId: string;
+} {
+	return { enabled: true, watchLegacyPath: false, targetSessionId: sessionId };
+}
+
+/**
+ * Create an isolated forwarding root with optional session directories and a
+ * watcher harness. Returns the harness plus a cleanup function that stops the
+ * watcher and removes the temp dir. When `ensureDirs` is false, session
+ * directories are not created, which causes the watcher to enable interval
+ * fallback.
+ */
+function createForwardingHarness(
+	sessionId: string,
+	options: { ensureDirs?: boolean } = {},
+): WatcherHarness {
+	const { ensureDirs = true } = options;
+	const rootDir = createTempForwardingRoot();
+	if (ensureDirs) {
+		ensureSessionDirectories(rootDir, sessionId);
+	}
+	return createWatcherHarness(rootDir);
 }
 
 test("permission forwarding watcher only emits valid current-session pending requests", () => {
@@ -129,17 +177,16 @@ test("permission forwarding watcher only emits valid current-session pending req
 	writeRequest(rootDir, foreignSessionId, createRequestFixture("foreign-directory", foreignSessionId));
 	writeJson(join(rootDir, "requests", "legacy-current.json"), createRequestFixture("legacy-current", currentSessionId));
 
-	const { requests, resolutions, watcher } = createWatcherHarness(rootDir);
+	const { requests, resolutions, watcher, cleanup } = createWatcherHarness(rootDir);
 	try {
-		watcher.start({ enabled: true, watchLegacyPath: true, targetSessionId: currentSessionId });
+		watcher.startWatching({ enabled: true, watchLegacyPath: true, targetSessionId: currentSessionId });
 
 		assert.deepEqual(requests.map((event) => event.requestId), ["valid-current"]);
 		assert.equal(requests[0]?.source, "primary");
 		assert.equal(requests[0]?.requesterAgentName, "Delegate Alpha");
 		assert.equal(resolutions.length, 0);
 	} finally {
-		watcher.stop();
-		rmSync(rootDir, { recursive: true, force: true });
+		cleanup();
 	}
 });
 
@@ -162,7 +209,7 @@ test("permission forwarding watcher caps parse failure counts and evicts removed
 	try {
 		const config = { enabled: true, watchLegacyPath: false, targetSessionId: currentSessionId };
 		for (let index = 0; index < 60; index += 1) {
-			watcher.start(config);
+			watcher.startWatching(config);
 		}
 
 		const parseFailureCountByFile = (watcher as unknown as { parseFailureCountByFile: Map<string, number> }).parseFailureCountByFile;
@@ -170,75 +217,80 @@ test("permission forwarding watcher caps parse failure counts and evicts removed
 		assert.equal(debugEvents.some((details) => details?.attemptCount === 50), true);
 
 		unlinkSync(corruptPath);
-		watcher.start(config);
+		watcher.startWatching(config);
 		assert.equal(parseFailureCountByFile.has(corruptPath), false);
 	} finally {
-		watcher.stop();
-		rmSync(rootDir, { recursive: true, force: true });
+		cleanupForwardingRoot(watcher, rootDir);
 	}
 });
 
-test("permission forwarding watcher keeps interval fallback disabled when required fs watchers are active", () => {
-	const rootDir = createTempForwardingRoot();
-	const currentSessionId = "parent-session";
-	ensureSessionDirectories(rootDir, currentSessionId);
-
-	const { watcher } = createWatcherHarness(rootDir);
+/**
+ * Run a test body against a forwarding watcher harness, ensuring cleanup runs
+ * in a finally block. Used by the interval-fallback tests that share the same
+ * try/finally/cleanup structure.
+ */
+function runWithCleanup(
+	harness: WatcherHarness,
+	body: (watcher: PermissionForwardingWatcher) => void,
+): void {
 	try {
-		watcher.start({ enabled: true, watchLegacyPath: false, targetSessionId: currentSessionId });
-		assert.equal((watcher as unknown as { fallbackScanTimer: NodeJS.Timeout | null }).fallbackScanTimer, null);
+		body(harness.watcher);
 	} finally {
-		watcher.stop();
-		rmSync(rootDir, { recursive: true, force: true });
+		harness.cleanup();
 	}
+}
+
+/**
+ * Run a fallback-timer test: start watching with the given harness and assert
+ * whether the fallback scan timer is active.
+ */
+function assertFallbackTimer(harness: WatcherHarness, expectActive: boolean): void {
+	runWithCleanup(harness, (watcher) => {
+		watcher.startWatching(watcherConfig("parent-session"));
+		const timer = (watcher as unknown as { fallbackScanTimer: NodeJS.Timeout | null }).fallbackScanTimer;
+		if (expectActive) {
+			assert.notEqual(timer, null);
+		} else {
+			assert.equal(timer, null);
+		}
+	});
+}
+
+test("permission forwarding watcher keeps interval fallback disabled when required fs watchers are active", () => {
+	assertFallbackTimer(createForwardingHarness("parent-session"), false);
 });
 
 test("permission forwarding watcher enables interval fallback while request directories cannot be watched", () => {
-	const rootDir = createTempForwardingRoot();
-	const currentSessionId = "parent-session";
-
-	const { watcher } = createWatcherHarness(rootDir);
-	try {
-		watcher.start({ enabled: true, watchLegacyPath: false, targetSessionId: currentSessionId });
-		assert.notEqual((watcher as unknown as { fallbackScanTimer: NodeJS.Timeout | null }).fallbackScanTimer, null);
-	} finally {
-		watcher.stop();
-		rmSync(rootDir, { recursive: true, force: true });
-	}
+	assertFallbackTimer(createForwardingHarness("parent-session", { ensureDirs: false }), true);
 });
 
 test("permission forwarding watcher resolves tracked requests when they are no longer pending", () => {
-	const rootDir = createTempForwardingRoot();
-	const currentSessionId = "parent-session";
-	ensureSessionDirectories(rootDir, currentSessionId);
-
-	const removedPath = writeRequest(rootDir, currentSessionId, createRequestFixture("removed-current", currentSessionId));
-	const { requests, resolutions, watcher } = createWatcherHarness(rootDir);
+	const { rootDir, requests, resolutions, watcher, cleanup } = createForwardingHarness("parent-session");
 	try {
-		const config = { enabled: true, watchLegacyPath: false, targetSessionId: currentSessionId };
-		watcher.start(config);
+		const removedPath = writeRequest(rootDir, "parent-session", createRequestFixture("removed-current", "parent-session"));
+		const config = watcherConfig("parent-session");
+		watcher.startWatching(config);
 		assert.deepEqual(requests.map((event) => event.requestId), ["removed-current"]);
 
 		unlinkSync(removedPath);
-		watcher.start(config);
+		watcher.startWatching(config);
 		assert.deepEqual(resolutions.map((event) => event.requestId), ["removed-current"]);
 		assert.equal(resolutions[0]?.reason, "request_removed");
 
-		writeRequest(rootDir, currentSessionId, createRequestFixture("responded-current", currentSessionId));
-		watcher.start(config);
+		writeRequest(rootDir, "parent-session", createRequestFixture("responded-current", "parent-session"));
+		watcher.startWatching(config);
 		assert.deepEqual(requests.map((event) => event.requestId), ["removed-current", "responded-current"]);
 
-		writeJson(join(responsesDirectory(rootDir, currentSessionId), "responded-current.json"), {
+		writeJson(join(responsesDirectory(rootDir, "parent-session"), "responded-current.json"), {
 			approved: false,
 			state: "denied",
-			responderSessionId: currentSessionId,
+			responderSessionId: "parent-session",
 			respondedAt: Date.now(),
 		});
-		watcher.start(config);
+		watcher.startWatching(config);
 		assert.deepEqual(resolutions.map((event) => event.requestId), ["removed-current", "responded-current"]);
 		assert.equal(resolutions[1]?.reason, "request_removed");
 	} finally {
-		watcher.stop();
-		rmSync(rootDir, { recursive: true, force: true });
+		cleanup();
 	}
 });

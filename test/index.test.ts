@@ -6,6 +6,28 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG } from "../src/config-store.ts";
 import smartVoiceNotifyExtension, { type SmartVoiceNotifyDependencies } from "../src/index.ts";
 import type { TTSAvailability, TTSConfig, TTSEngine, TTSService, SpeakOptions } from "../src/types/tts.ts";
+import {
+	PERMISSION_SYSTEM_EVENT_CHANNEL,
+	PERMISSION_BATCH_WINDOW_MS,
+	disableFocusDetection,
+	enableFocusDetection,
+	useMockClock,
+	flushAsyncWork,
+	tickAndFlush,
+	permissionEvent,
+	permissionSystemEvent,
+	countReminderCalls,
+	immediateNotificationCalls,
+	reminderCalls,
+	emitSessionStart,
+	emitPermissionWait,
+	emitPermissionResolve,
+	assertSingleImmediateNotification,
+	assertNoNotifications,
+	assertSingleNotificationNoReminder,
+	emitToolResult,
+	emitAgentEndError,
+} from "./helpers.ts";
 import type { VoiceNotifyConfig } from "../src/types.ts";
 
 interface FakeContext {
@@ -29,9 +51,6 @@ type ForwardedPermissionRequestEvent = Parameters<PermissionForwardingWatcherOpt
 type ForwardedPermissionResolutionEvent = Parameters<PermissionForwardingWatcherOptions["onResolve"]>[0];
 type PermissionForwardingWatcherConfig = Parameters<PermissionForwardingWatcherController["start"]>[0];
 type EventBusHandler = (payload: unknown) => void;
-
-const PERMISSION_SYSTEM_EVENT_CHANNEL = "pi-permission-system:permission-request";
-const PERMISSION_BATCH_WINDOW_MS = 800;
 
 const EMPTY_AVAILABILITY: TTSAvailability = {
 	"espeak-ng": false,
@@ -87,7 +106,7 @@ class FakePi {
 	public sendMessage(): void {
 	}
 
-	public async exec(): Promise<never> {
+	public async fakeExec(): Promise<never> {
 		throw new Error("Unexpected exec invocation in pi-smart-voice-notify index test");
 	}
 
@@ -98,36 +117,37 @@ class FakePi {
 	}
 }
 
-class FakePermissionForwardingWatcher implements PermissionForwardingWatcherController {
-	private readonly onRequest: PermissionForwardingWatcherOptions["onRequest"];
-	private readonly onResolve: PermissionForwardingWatcherOptions["onResolve"];
+type FakePermissionForwardingWatcher = PermissionForwardingWatcherController & {
+	currentConfig: PermissionForwardingWatcherConfig | null;
+	emitRequest(event: ForwardedPermissionRequestEvent): void;
+	emitResolve(event: ForwardedPermissionResolutionEvent): void;
+};
 
-	public currentConfig: PermissionForwardingWatcherConfig | null = null;
-
-	public constructor(options: PermissionForwardingWatcherOptions) {
-		this.onRequest = options.onRequest;
-		this.onResolve = options.onResolve;
-	}
-
-	public start(config: PermissionForwardingWatcherConfig): void {
-		this.currentConfig = config;
-	}
-
-	public updateConfig(config: PermissionForwardingWatcherConfig): void {
-		this.currentConfig = config;
-	}
-
-	public stop(): void {
-		this.currentConfig = null;
-	}
-
-	public emitRequest(event: ForwardedPermissionRequestEvent): void {
-		this.onRequest(event);
-	}
-
-	public emitResolve(event: ForwardedPermissionResolutionEvent): void {
-		this.onResolve(event);
-	}
+function createFakePermissionForwardingWatcher(options: PermissionForwardingWatcherOptions): FakePermissionForwardingWatcher {
+	const onRequest = options.onRequest;
+	const onResolve = options.onResolve;
+	let currentConfig: PermissionForwardingWatcherConfig | null = null;
+	return {
+		currentConfig,
+		startWatching: (config: PermissionForwardingWatcherConfig): void => {
+			currentConfig = config;
+		},
+		restart: (config: PermissionForwardingWatcherConfig): void => {
+			currentConfig = config;
+		},
+		stop: (): void => {
+			currentConfig = null;
+		},
+		emitRequest: (event: ForwardedPermissionRequestEvent): void => {
+			onRequest(event);
+		},
+		emitResolve: (event: ForwardedPermissionResolutionEvent): void => {
+			onResolve(event);
+		},
+		get currentConfig() {
+			return currentConfig;
+		},
+	};
 }
 
 function createTestConfig(overrides: Partial<VoiceNotifyConfig> = {}): VoiceNotifyConfig {
@@ -181,7 +201,7 @@ function createTestConfig(overrides: Partial<VoiceNotifyConfig> = {}): VoiceNoti
 function createControlledTTSService(): { calls: SpeakCall[]; service: TTSService } {
 	const calls: SpeakCall[] = [];
 	const service: TTSService = {
-		async speak(text: string, _engine: TTSEngine = "auto", options: SpeakOptions = {}): Promise<boolean> {
+		speak: async (text: string, _engine: TTSEngine = "auto", options: SpeakOptions = {}): Promise<boolean> => {
 			if (!options.signal) {
 				calls.push({
 					text,
@@ -228,13 +248,13 @@ function createControlledTTSService(): { calls: SpeakCall[]; service: TTSService
 				);
 			});
 		},
-		async detectAvailableEngines(): Promise<TTSAvailability> {
+		refreshEngineAvailability: async (): Promise<TTSAvailability> => {
 			return EMPTY_AVAILABILITY;
 		},
-		getAvailableEngines(): Readonly<TTSAvailability> {
+		getAvailableEngines: (): Readonly<TTSAvailability> => {
 			return EMPTY_AVAILABILITY;
 		},
-		getConfig(): Readonly<TTSConfig> {
+		getConfig: (): Readonly<TTSConfig> => {
 			return {} as TTSConfig;
 		},
 	};
@@ -259,7 +279,7 @@ function createHarness(
 		readConfigFromDisk: () => createTestConfig(configOverrides),
 		initializeTTSService: () => service,
 		createPermissionForwardingWatcher: (options) => {
-			forwardingWatcher = new FakePermissionForwardingWatcher(options);
+			forwardingWatcher = createFakePermissionForwardingWatcher(options);
 			return forwardingWatcher;
 		},
 		...dependencyOverrides,
@@ -274,41 +294,6 @@ function createHarness(
 		forwardingWatcher,
 		pi,
 		ttsCalls: calls,
-	};
-}
-
-function permissionEvent(toolCallId: string): { block: boolean; reason: string; toolCallId: string; toolName: string } {
-	return {
-		block: true,
-		reason: "Requires approval from the user before continuing.",
-		toolCallId,
-		toolName: "write_file",
-	};
-}
-
-function permissionSystemEvent(
-	state: "waiting" | "approved" | "denied",
-	requestId: string,
-	overrides: Partial<{
-		source: "tool_call" | "skill_input" | "skill_read";
-		message: string;
-		toolCallId: string;
-		toolName: string;
-		skillName: string;
-		path: string;
-		agentName: string | null;
-	}> = {},
-): Record<string, unknown> {
-	return {
-		requestId,
-		state,
-		source: overrides.source ?? "tool_call",
-		message: overrides.message ?? "Current agent requested tool 'write'. Allow this call?",
-		toolCallId: overrides.toolCallId,
-		toolName: overrides.toolName,
-		skillName: overrides.skillName,
-		path: overrides.path,
-		agentName: overrides.agentName ?? null,
 	};
 }
 
@@ -334,64 +319,27 @@ function forwardedPermissionResolution(
 	};
 }
 
-function countReminderCalls(calls: SpeakCall[]): number {
-	return calls.filter((call) => call.signal).length;
-}
-
-function immediateNotificationCalls(calls: SpeakCall[]): SpeakCall[] {
-	return calls.filter((call) => !call.signal);
-}
-
-function reminderCalls(calls: SpeakCall[]): SpeakCall[] {
-	return calls.filter((call) => call.signal);
-}
-
-function setFocusDetection(t: TestContext, value: "0" | "1"): void {
-	const previousFocusDetection = process.env.PI_SMART_NOTIFY_FOCUS_DETECTION;
-	process.env.PI_SMART_NOTIFY_FOCUS_DETECTION = value;
-	t.after(() => {
-		if (previousFocusDetection === undefined) {
-			delete process.env.PI_SMART_NOTIFY_FOCUS_DETECTION;
-			return;
-		}
-		process.env.PI_SMART_NOTIFY_FOCUS_DETECTION = previousFocusDetection;
-	});
-}
-
-function disableFocusDetection(t: TestContext): void {
-	setFocusDetection(t, "0");
-}
-
-function enableFocusDetection(t: TestContext): void {
-	setFocusDetection(t, "1");
-}
-
-function useMockClock(t: TestContext): void {
-	mock.timers.enable({ apis: ["setTimeout", "Date"] });
-	mock.timers.setTime(1_000);
-	t.after(() => mock.timers.reset());
-}
-
-async function flushAsyncWork(): Promise<void> {
-	await Promise.resolve();
-	await Promise.resolve();
-	await new Promise((resolve) => setImmediate(resolve));
-}
-
-async function tickAndFlush(milliseconds: number): Promise<void> {
-	mock.timers.tick(milliseconds);
-	await flushAsyncWork();
-	await flushAsyncWork();
-}
-
-test("skipWhenFocused=false still notifies even when the terminal is focused", async (t) => {
+/**
+ * Create a test harness with focus detection enabled and a focus-check
+ * collector. Used by the skipWhenFocused true/false tests that share the
+ * same isTerminalFocused callback shape.
+ */
+function createFocusDetectionHarness(
+	t: TestContext,
+	skipWhenFocused: boolean,
+): {
+	ctx: FakeContext;
+	pi: FakePi;
+	ttsCalls: SpeakCall[];
+	focusChecks: Array<{ cacheTtlMs?: number }>;
+} {
 	enableFocusDetection(t);
 	useMockClock(t);
 
 	const focusChecks: Array<{ cacheTtlMs?: number }> = [];
 	const { ctx, pi, ttsCalls } = createHarness(
 		{
-			skipWhenFocused: false,
+			skipWhenFocused,
 			focusCacheTtlMs: 975,
 		},
 		{
@@ -401,51 +349,25 @@ test("skipWhenFocused=false still notifies even when the terminal is focused", a
 			},
 		},
 	);
+	return { ctx, pi, ttsCalls, focusChecks };
+}
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-focus-disabled", {
-			toolCallId: "call-focus-disabled",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
+test("skipWhenFocused=false still notifies even when the terminal is focused", async (t) => {
+	const { ctx, pi, ttsCalls, focusChecks } = createFocusDetectionHarness(t, false);
+
+	await emitSessionStart(pi, ctx);
+	await emitPermissionWait(pi, "permission-focus-disabled", { toolCallId: "call-focus-disabled", toolName: "write_file" });
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assertSingleImmediateNotification(ttsCalls);
 	assert.equal(focusChecks.length, 0);
 });
 
 test("skipWhenFocused=true suppresses focused notifications and uses config focus cache ttl", async (t) => {
-	enableFocusDetection(t);
-	useMockClock(t);
+	const { ctx, pi, ttsCalls, focusChecks } = createFocusDetectionHarness(t, true);
 
-	const focusChecks: Array<{ cacheTtlMs?: number }> = [];
-	const { ctx, pi, ttsCalls } = createHarness(
-		{
-			skipWhenFocused: true,
-			focusCacheTtlMs: 975,
-		},
-		{
-			isTerminalFocused: async (options) => {
-				focusChecks.push({ cacheTtlMs: options.cacheTtlMs });
-				return true;
-			},
-		},
-	);
-
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-focus-enabled", {
-			toolCallId: "call-focus-enabled",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
+	await emitSessionStart(pi, ctx);
+	await emitPermissionWait(pi, "permission-focus-enabled", { toolCallId: "call-focus-enabled", toolName: "write_file" });
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
@@ -497,8 +419,7 @@ test("initializeTTSService receives the full configured TTS settings", async (t)
 		},
 	);
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
+	await emitSessionStart(pi, ctx);
 
 	const latestConfig = capturedConfigs.at(-1);
 	assert.ok(latestConfig);
@@ -542,19 +463,11 @@ test("permission reminders use the permission-specific reminder interval", async
 		},
 	});
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-reminder-delay", {
-			toolCallId: "call-permission-reminder-delay",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
+	await emitSessionStart(pi, ctx);
+	await emitPermissionWait(pi, "permission-reminder-delay", { toolCallId: "call-permission-reminder-delay", toolName: "write_file" });
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assertSingleImmediateNotification(ttsCalls);
 	assert.equal(countReminderCalls(ttsCalls), 0);
 
 	await tickAndFlush(2_999);
@@ -564,141 +477,188 @@ test("permission reminders use the permission-specific reminder interval", async
 	assert.equal(countReminderCalls(ttsCalls), 1);
 });
 
-test("blocked tool_call events do not trigger permission notifications without permission-system waiting state", async (t) => {
+interface TestHarness {
+	ctx: FakeContext;
+	forwardingWatcher: FakePermissionForwardingWatcher;
+	pi: FakePi;
+	ttsCalls: SpeakCall[];
+}
+
+/**
+ * Base test setup: disable focus detection, enable mock clock, create a
+ * harness with the given config overrides, and emit session_start.
+ */
+async function createTestHarness(
+	t: TestContext,
+	configOverrides: Partial<VoiceNotifyConfig> = {},
+): Promise<TestHarness> {
 	disableFocusDetection(t);
 	useMockClock(t);
+	const harness = createHarness(configOverrides);
+	await emitSessionStart(harness.pi, harness.ctx);
+	return harness;
+}
 
-	const { ctx, pi, ttsCalls } = createHarness();
+/**
+ * Standard permission-notification test setup: default harness with session_start.
+ */
+async function setupPermissionTest(t: TestContext): Promise<TestHarness> {
+	return createTestHarness(t);
+}
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
+/**
+ * Forwarded-permission-watcher test setup: harness with the watcher enabled.
+ */
+async function setupForwardedPermissionTest(
+	t: TestContext,
+	configOverrides: Partial<VoiceNotifyConfig> = {},
+): Promise<TestHarness> {
+	return createTestHarness(t, {
+		enableForwardedPermissionWatcher: true,
+		...configOverrides,
+	});
+}
+
+test("blocked tool_call events do not trigger permission notifications without permission-system waiting state", async (t) => {
+	const { ctx, pi, ttsCalls } = await setupPermissionTest(t);
+
 	await pi.emit("tool_call", permissionEvent("call-no-authoritative-wait"), ctx);
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
-	assert.equal(countReminderCalls(ttsCalls), 0);
+	assertNoNotifications(ttsCalls);
 });
 
 test("permission-looking tool_result errors do not trigger permission notifications without permission-system waiting state", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
+	const { ctx, pi, ttsCalls } = await setupPermissionTest(t);
 
-	const { ctx, pi, ttsCalls } = createHarness();
-
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	await pi.emit(
-		"tool_result",
-		{
-			toolCallId: "result-no-authoritative-wait",
-			toolName: "permission_guard",
-			isError: true,
-			content: [{ type: "text", text: "Requires approval from the user before continuing." }],
-		},
-		ctx,
-	);
-	await flushAsyncWork();
+	await emitToolResult(pi, ctx, {
+		toolCallId: "result-no-authoritative-wait",
+		toolName: "permission_guard",
+		isError: true,
+		text: "Requires approval from the user before continuing.",
+	});
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
-	assert.equal(countReminderCalls(ttsCalls), 0);
+	assertNoNotifications(ttsCalls);
 });
 
 test("permission-system waiting events trigger a permission notification and cancel on resolution", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
+	const { ctx, pi, ttsCalls } = await setupPermissionTest(t);
 
-	const { ctx, pi, ttsCalls } = createHarness();
-
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-wait", {
-			toolCallId: "call-wait",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
+	await emitPermissionWait(pi, "permission-wait", { toolCallId: "call-wait", toolName: "write_file" });
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assertSingleImmediateNotification(ttsCalls);
 
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("approved", "permission-wait", {
-			toolCallId: "call-wait",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
+	await emitPermissionResolve(pi, "permission-wait", "approved", { toolCallId: "call-wait", toolName: "write_file" });
 	await tickAndFlush(1_000);
 
 	assert.equal(countReminderCalls(ttsCalls), 0);
 });
 
-test("permission-system waiting events do not duplicate a later blocked tool_call notification", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
+test("resolved permission does not suppress a subsequent waiting event with the same toolCallId", async (t) => {
+	const { ctx, pi, ttsCalls } = await setupPermissionTest(t);
 
-	const { ctx, pi, ttsCalls } = createHarness();
+	// First permission request — waiting, then resolved
+	await emitPermissionWait(pi, "request-1", { toolCallId: "call-retry", toolName: "write_file" });
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1, "first waiting event should notify");
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-dedupe", {
-			toolCallId: "call-dedupe",
-			toolName: "write_file",
-		}),
-	);
+	await emitPermissionResolve(pi, "request-1", "approved", { toolCallId: "call-retry", toolName: "write_file" });
+
+	// Second permission request with the SAME toolCallId — simulates the agent
+	// retrying the same tool call after a prior approval/denial
+	await emitPermissionWait(pi, "request-2", { toolCallId: "call-retry", toolName: "write_file" });
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 2, "second waiting event with same toolCallId must notify");
+});
+
+test("resolved permission does not suppress a subsequent waiting event with the same requestId (no toolCallId)", async (t) => {
+	const { pi, ttsCalls } = await setupPermissionTest(t);
+
+	const emitWaiting = (): void => {
+		pi.events.emit(
+			PERMISSION_SYSTEM_EVENT_CHANNEL,
+			permissionSystemEvent("waiting", "request-same"),
+		);
+	};
+
+	emitWaiting();
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1, "first waiting event should notify");
+
+	await emitPermissionResolve(pi, "request-same", "denied");
+
+	emitWaiting();
+	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 2, "second waiting event with same requestId must notify");
+});
+
+test("resolved forwarded permission does not suppress a subsequent forwarded request with the same requestId", async (t) => {
+	const { forwardingWatcher, pi, ttsCalls } = await setupForwardedPermissionTest(t);
+
+	const emitForwardedRequest = (): void => {
+		forwardingWatcher.emitRequest(forwardedPermissionRequest("forwarded-retry", "Builder Beta"));
+	};
+
+	emitForwardedRequest();
+	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 1, "first forwarded request should notify");
+
+	forwardingWatcher.emitResolve(forwardedPermissionResolution("forwarded-retry"));
+	await flushAsyncWork();
+
+	emitForwardedRequest();
+	await flushAsyncWork();
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+
+	assert.equal(immediateNotificationCalls(ttsCalls).length, 2, "second forwarded request with same requestId must notify");
+});
+
+test("permission-system waiting events do not duplicate a later blocked tool_call notification", async (t) => {
+	const { ctx, pi, ttsCalls } = await setupPermissionTest(t);
+
+	await emitPermissionWait(pi, "permission-dedupe", { toolCallId: "call-dedupe", toolName: "write_file" });
+	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
+	assertSingleImmediateNotification(ttsCalls);
 
 	await pi.emit("tool_call", permissionEvent("call-dedupe"), ctx);
 	await flushAsyncWork();
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assertSingleImmediateNotification(ttsCalls);
 });
 
+/**
+ * Assert that exactly one active (non-aborted) reminder call exists.
+ */
+function assertSingleActiveReminder(calls: SpeakCall[]): SpeakCall {
+	const activeReminderCalls = reminderCalls(calls);
+	assert.equal(activeReminderCalls.length, 1);
+	assert.equal(activeReminderCalls[0]?.aborted, false);
+	return activeReminderCalls[0];
+}
+
 test("tool_execution_start only cancels the resolved permission reminder flow", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
+	const { ctx, pi, ttsCalls } = await setupPermissionTest(t);
 
-	const { ctx, pi, ttsCalls } = createHarness();
-
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-call-a", {
-			toolCallId: "call-a",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-call-b", {
-			toolCallId: "call-b",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
+	await emitPermissionWait(pi, "permission-call-a", { toolCallId: "call-a", toolName: "write_file" });
+	await emitPermissionWait(pi, "permission-call-b", { toolCallId: "call-b", toolName: "write_file" });
 
 	assert.equal(countReminderCalls(ttsCalls), 0);
 
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	await tickAndFlush(1_000);
-	const activeReminderCalls = reminderCalls(ttsCalls);
-	assert.equal(activeReminderCalls.length, 1);
-	assert.equal(activeReminderCalls[0]?.aborted, false);
+	const activeReminder = assertSingleActiveReminder(ttsCalls);
 
 	await pi.emit("tool_execution_start", { toolCallId: "call-a", toolName: "write_file" }, ctx);
 	await flushAsyncWork();
-	assert.equal(activeReminderCalls[0]?.aborted, true);
+	assert.equal(activeReminder.aborted, true);
 
 	await flushAsyncWork();
 	const remainingReminderCalls = reminderCalls(ttsCalls);
@@ -711,29 +671,10 @@ test("tool_execution_start only cancels the resolved permission reminder flow", 
 });
 
 test("tool_result resolution keeps another permission reminder active while dropping the resolved queued flow", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
+	const { ctx, pi, ttsCalls } = await setupPermissionTest(t);
 
-	const { ctx, pi, ttsCalls } = createHarness();
-
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-result-call-a", {
-			toolCallId: "call-a",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-result-call-b", {
-			toolCallId: "call-b",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
+	await emitPermissionWait(pi, "permission-result-call-a", { toolCallId: "call-a", toolName: "write_file" });
+	await emitPermissionWait(pi, "permission-result-call-b", { toolCallId: "call-b", toolName: "write_file" });
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	await tickAndFlush(1_000);
 
@@ -760,61 +701,51 @@ test("tool_result errors resolve permission flows without error notifications wh
 		enableErrorNotification: true,
 	});
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	pi.events.emit(
-		PERMISSION_SYSTEM_EVENT_CHANNEL,
-		permissionSystemEvent("waiting", "permission-shared", {
-			toolCallId: "call-shared",
-			toolName: "write_file",
-		}),
-	);
-	await flushAsyncWork();
+	await emitSessionStart(pi, ctx);
+	await emitPermissionWait(pi, "permission-shared", { toolCallId: "call-shared", toolName: "write_file" });
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assertSingleImmediateNotification(ttsCalls);
 
-	await pi.emit(
-		"tool_result",
-		{
-			toolCallId: "call-shared",
-			toolName: "write_file",
-			isError: true,
-			content: [{ type: "text", text: "Write failed because the destination disk is full." }],
-		},
-		ctx,
-	);
-	await flushAsyncWork();
+	await emitToolResult(pi, ctx, {
+		toolCallId: "call-shared",
+		toolName: "write_file",
+		isError: true,
+		text: "Write failed because the destination disk is full.",
+	});
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
+	assertSingleImmediateNotification(ttsCalls);
 });
 
-test("agent_end error is suppressed when continuation messages are pending", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
-
-	let hasPendingMessages = true;
-	const { ctx, pi, ttsCalls } = createHarness({
+/**
+ * Setup for agent_end error notification tests: harness with error
+ * notifications enabled, set hasPendingMessages callback, emit session_start,
+ * then emit an agent_end error.
+ */
+async function setupAgentEndErrorTest(
+	t: TestContext,
+	errorMessage: string,
+	hasPendingMessages: () => boolean,
+): Promise<{
+	ctx: FakeContext;
+	pi: FakePi;
+	ttsCalls: SpeakCall[];
+}> {
+	const harness = await createTestHarness(t, {
 		enableErrorNotification: true,
 		reminderEnabled: false,
 	});
-	ctx.hasPendingMessages = () => hasPendingMessages;
+	harness.ctx.hasPendingMessages = hasPendingMessages;
+	await emitAgentEndError(harness.pi, harness.ctx, errorMessage);
+	return harness;
+}
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	await pi.emit(
-		"agent_end",
-		{
-			messages: [
-				{
-					role: "assistant",
-					stopReason: "error",
-					errorMessage: "bash tool failed; retry queued",
-				},
-			],
-		},
-		ctx,
+test("agent_end error is suppressed when continuation messages are pending", async (t) => {
+	let hasPendingMessages = true;
+	const { ctx, pi, ttsCalls } = await setupAgentEndErrorTest(
+		t,
+		"bash tool failed; retry queued",
+		() => hasPendingMessages,
 	);
-	await flushAsyncWork();
 	await tickAndFlush(10_000);
 
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
@@ -826,31 +757,11 @@ test("agent_end error is suppressed when continuation messages are pending", asy
 });
 
 test("agent_end error still notifies when no continuation messages are pending", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
-
-	const { ctx, pi, ttsCalls } = createHarness({
-		enableErrorNotification: true,
-		reminderEnabled: false,
-	});
-	ctx.hasPendingMessages = () => false;
-
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	await pi.emit(
-		"agent_end",
-		{
-			messages: [
-				{
-					role: "assistant",
-					stopReason: "error",
-					errorMessage: "terminal failure",
-				},
-			],
-		},
-		ctx,
+	const { pi, ttsCalls } = await setupAgentEndErrorTest(
+		t,
+		"terminal failure",
+		() => false,
 	);
-	await flushAsyncWork();
 	await tickAndFlush(10_000);
 
 	const calls = immediateNotificationCalls(ttsCalls);
@@ -858,22 +769,33 @@ test("agent_end error still notifies when no continuation messages are pending",
 	assert.match(calls[0]?.text ?? "", /terminal failure/);
 });
 
-test("agent_end triggers an idle notification when idle notifications are enabled", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
-
-	const { ctx, pi, ttsCalls } = createHarness({
-		enableIdleNotification: true,
+/**
+ * Setup for single-notification tests: harness with a specific notification
+ * type enabled and reminders disabled, then emit session_start.
+ */
+async function setupSingleNotificationTest(
+	t: TestContext,
+	configOverrides: Partial<VoiceNotifyConfig>,
+): Promise<{
+	ctx: FakeContext;
+	pi: FakePi;
+	ttsCalls: SpeakCall[];
+}> {
+	return createTestHarness(t, {
 		reminderEnabled: false,
+		...configOverrides,
+	});
+}
+
+test("agent_end triggers an idle notification when idle notifications are enabled", async (t) => {
+	const { ctx, pi, ttsCalls } = await setupSingleNotificationTest(t, {
+		enableIdleNotification: true,
 	});
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
 	await pi.emit("agent_end", {}, ctx);
 	await flushAsyncWork();
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
-	assert.equal(countReminderCalls(ttsCalls), 0);
+	assertSingleNotificationNoReminder(ttsCalls);
 });
 
 test("question-classified tool_result triggers a question notification when the question tool is available", async (t) => {
@@ -886,62 +808,35 @@ test("question-classified tool_result triggers a question notification when the 
 	});
 	pi.setAvailableTools([{ name: "question" }]);
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	await pi.emit(
-		"tool_result",
-		{
-			toolCallId: "call-question-available",
-			toolName: "custom_tool",
-			isError: false,
-			content: [{ type: "text", text: "This request requires your input before continuing." }],
-		},
-		ctx,
-	);
-	await flushAsyncWork();
+	await emitSessionStart(pi, ctx);
+	await emitToolResult(pi, ctx, {
+		toolCallId: "call-question-available",
+		toolName: "custom_tool",
+		text: "This request requires your input before continuing.",
+	});
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 1);
-	assert.equal(countReminderCalls(ttsCalls), 0);
+	assertSingleNotificationNoReminder(ttsCalls);
 });
 
 test("question-classified tool_result does not notify when the question tool is unavailable", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
-
-	const { ctx, pi, ttsCalls } = createHarness({
+	const { ctx, pi, ttsCalls } = await setupSingleNotificationTest(t, {
 		enableQuestionNotification: true,
-		reminderEnabled: false,
 	});
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
-	await pi.emit(
-		"tool_result",
-		{
-			toolCallId: "call-question-unavailable",
-			toolName: "custom_tool",
-			isError: false,
-			content: [{ type: "text", text: "This request requires your input before continuing." }],
-		},
-		ctx,
-	);
-	await flushAsyncWork();
+	await emitToolResult(pi, ctx, {
+		toolCallId: "call-question-unavailable",
+		toolName: "custom_tool",
+		text: "This request requires your input before continuing.",
+	});
 
-	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
-	assert.equal(countReminderCalls(ttsCalls), 0);
+	assertNoNotifications(ttsCalls);
 });
 
 test("forwarded permission resolution cancels a queued reminder before it fires", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
-
-	const { ctx, forwardingWatcher, pi, ttsCalls } = createHarness({
-		enableForwardedPermissionWatcher: true,
+	const { forwardingWatcher, pi, ttsCalls } = await setupForwardedPermissionTest(t, {
 		includeForwardedPermissionAgentName: true,
 	});
 
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
 	forwardingWatcher.emitRequest(forwardedPermissionRequest("forwarded-queued", "Builder Beta"));
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
@@ -958,28 +853,19 @@ test("forwarded permission resolution cancels a queued reminder before it fires"
 });
 
 test("forwarded permission resolution aborts active reminder playback for that request", async (t) => {
-	disableFocusDetection(t);
-	useMockClock(t);
+	const { forwardingWatcher, pi, ttsCalls } = await setupForwardedPermissionTest(t);
 
-	const { ctx, forwardingWatcher, pi, ttsCalls } = createHarness({
-		enableForwardedPermissionWatcher: true,
-	});
-
-	await pi.emit("session_start", {}, ctx);
-	await flushAsyncWork();
 	forwardingWatcher.emitRequest(forwardedPermissionRequest("forwarded-active"));
 	await flushAsyncWork();
 	await tickAndFlush(PERMISSION_BATCH_WINDOW_MS);
 	await tickAndFlush(1_000);
 
-	const activeReminderCalls = reminderCalls(ttsCalls);
-	assert.equal(activeReminderCalls.length, 1);
-	assert.equal(activeReminderCalls[0]?.aborted, false);
+	const activeReminder = assertSingleActiveReminder(ttsCalls);
 
 	forwardingWatcher.emitResolve(forwardedPermissionResolution("forwarded-active"));
 	await flushAsyncWork();
 
-	assert.equal(activeReminderCalls[0]?.aborted, true);
+	assert.equal(activeReminder.aborted, true);
 });
 
 test("session_start reads project config using ctx.cwd", async () => {
@@ -993,7 +879,7 @@ test("session_start reads project config using ctx.cwd", async () => {
 			return createTestConfig({});
 		},
 		initializeTTSService: () => service,
-		createPermissionForwardingWatcher: (options) => new FakePermissionForwardingWatcher(options),
+		createPermissionForwardingWatcher: (options) => createFakePermissionForwardingWatcher(options),
 	});
 
 	await pi.emit("session_start", { reason: "startup" }, { hasUI: false, cwd: "/repo" });
