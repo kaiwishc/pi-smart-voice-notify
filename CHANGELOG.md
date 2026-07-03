@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-03
+
+### Added
+- Added an `enabled` master toggle to the config so the extension can be disabled without uninstalling. ([76cd96f](https://github.com/MasuRii/pi-smart-voice-notify/commit/76cd96fbbd6bd0658f00e8d7c043c44260f856bd))
+
+### Changed
+- Widened Pi coding-agent and Pi TUI peer dependency ranges to include `^0.80.0` and bumped development dependencies (`@types/node` to `26.1.0`, `@earendil-works/pi-coding-agent` to `^0.80.3`). ([146ff6e](https://github.com/MasuRii/pi-smart-voice-notify/commit/146ff6edf87de680958e61f0e1db34e6d337c729))
+- Extracted shared utilities and consolidated duplicated logic across config, notification, and platform modules. ([76cd96f](https://github.com/MasuRii/pi-smart-voice-notify/commit/76cd96fbbd6bd0658f00e8d7c043c44260f856bd))
+- Extracted shared test helpers and consolidated fixtures across the test suite. ([6cf3ed0](https://github.com/MasuRii/pi-smart-voice-notify/commit/6cf3ed0168c1460ffca3c447f4a7a55565f5cade))
+
 ## [0.5.4] - 2026-06-22
 
 ### Fixed
