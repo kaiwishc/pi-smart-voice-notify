@@ -355,6 +355,7 @@ export default function smartVoiceNotifyExtension(
 	const reminderPlayback = new ReminderPlaybackController();
 	const pendingPermissionToolCallIds = new Set<string>();
 	const processedToolResultToolCallIds = new Set<string>();
+	const notifiedQuestionToolCallIds = new Set<string>();
 	const lastNotificationAt = new Map<NotificationType, number>();
 
 	// Batch near-simultaneous permission requests so we don't spam sound/toasts when the agent
@@ -709,7 +710,10 @@ export default function smartVoiceNotifyExtension(
 
 	const refreshQuestionToolAvailability = (): void => {
 		try {
-			questionToolAvailable = pi.getAllTools().some((tool: { name: string }) => tool.name.toLowerCase() === "question");
+			questionToolAvailable = pi.getAllTools().some((tool: { name: string }) => {
+				const n = tool.name.toLowerCase();
+				return n === "question" || n === "ask_user_question";
+			});
 		} catch {
 			questionToolAvailable = false;
 		}
@@ -1937,6 +1941,7 @@ export default function smartVoiceNotifyExtension(
 		hadErrorInTurn = false;
 		pendingPermissionToolCallIds.clear();
 		processedToolResultToolCallIds.clear();
+		notifiedQuestionToolCallIds.clear();
 		resetPermissionBatch("agent_start");
 		cancelReminderActivity("agent_start");
 		logger.debug("agent.start", {});
@@ -1951,6 +1956,26 @@ export default function smartVoiceNotifyExtension(
 		resolvePermissionInteraction(event.toolCallId, "tool_execution_start", {
 			toolName: event.toolName,
 		});
+
+		// Trigger question notification immediately when a question tool starts executing,
+		// rather than waiting for tool_result (which fires only after the user answers).
+		if (config.enabled && config.enableQuestionNotification) {
+			const startedToolName = (event.toolName ?? "").toLowerCase();
+			if (startedToolName.includes("question") && event.toolCallId) {
+				notifiedQuestionToolCallIds.add(event.toolCallId);
+				if (notifiedQuestionToolCallIds.size > 500) {
+					notifiedQuestionToolCallIds.clear();
+					notifiedQuestionToolCallIds.add(event.toolCallId);
+				}
+				logger.debug("question.notify.immediate", {
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+				});
+				triggerNotification("question", activeSessionContext!, {
+					reason: `tool_start:${event.toolName}`,
+				});
+			}
+		}
 	});
 
 	pi.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
@@ -1973,8 +1998,19 @@ export default function smartVoiceNotifyExtension(
 		if (!type) {
 			return;
 		}
-		if (type === "question" && !questionToolAvailable) {
-			return;
+		if (type === "question") {
+			// Skip if already notified at tool_execution_start
+			if (notifiedQuestionToolCallIds.has(event.toolCallId)) {
+				notifiedQuestionToolCallIds.delete(event.toolCallId);
+				logger.debug("question.notify.skipped_duplicate", {
+					toolCallId: event.toolCallId,
+					toolName,
+				});
+				return;
+			}
+			if (!questionToolAvailable) {
+				return;
+			}
 		}
 
 		logger.debug("tool_result.classified", {
