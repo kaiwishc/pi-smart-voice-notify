@@ -459,6 +459,7 @@ export default function smartVoiceNotifyExtension(
 			maxRetries: config.webhook.maxRetries,
 			requestTimeoutMs: config.webhook.requestTimeoutMs,
 			discordUsername: config.webhook.username,
+			allowLanWebhook: config.webhook.allowLanWebhook,
 			logger: (message: string, details: Record<string, unknown> = {}) => {
 				logger.debug(`webhook.${message}`, details);
 			},
@@ -1645,6 +1646,9 @@ export default function smartVoiceNotifyExtension(
 			case "volume":
 				draft.volume = clampInt(Number(value), draft.volume, 0, 100);
 				return;
+			case "allowLanWebhook":
+				draft.webhook.allowLanWebhook = boolValue(value);
+				return;
 			default:
 				return;
 		}
@@ -1672,6 +1676,7 @@ export default function smartVoiceNotifyExtension(
 				values: [...BOOLEAN_VALUES],
 			},
 			{ id: "volume", label: "Volume (%)", currentValue: String(draft.volume), values: volumeValues },
+			{ id: "allowLanWebhook", label: "Allow LAN Webhook URLs", currentValue: draft.webhook.allowLanWebhook ? "on" : "off", values: [...BOOLEAN_VALUES] },
 		];
 	};
 

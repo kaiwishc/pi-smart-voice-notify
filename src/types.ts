@@ -30,6 +30,7 @@ export interface WebhookSettingsConfig {
 	minIntervalMs: number;
 	maxRetries: number;
 	requestTimeoutMs: number;
+	allowLanWebhook: boolean;
 }
 
 export interface AIMessageCacheConfig {

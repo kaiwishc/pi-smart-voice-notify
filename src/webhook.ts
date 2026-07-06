@@ -59,6 +59,7 @@ export interface WebhookConfig {
 	discordUsername?: string;
 	discordAvatarUrl?: string;
 	genericHeaders?: Record<string, string>;
+	allowLanWebhook?: boolean;
 	logger?: (message: string, details?: Record<string, unknown>) => void;
 	dnsLookup?: WebhookDnsLookup;
 	fetch?: WebhookFetch;
@@ -92,6 +93,7 @@ interface ResolvedWebhookConfig {
 	discordMention?: MentionValue;
 	discordUsername?: string;
 	discordAvatarUrl?: string;
+	allowLanWebhook: boolean;
 	logger: (message: string, details?: Record<string, unknown>) => void;
 	dnsLookup: WebhookDnsLookup;
 	fetch: WebhookFetch;
@@ -251,19 +253,23 @@ function isInternalHostname(hostname: string): boolean {
 	);
 }
 
-export function isWebhookUrlAllowed(value: string): boolean {
+export function isWebhookUrlAllowed(value: string, allowLan = false): boolean {
 	try {
 		const parsed = new URL(value);
 		if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
 			return false;
 		}
 
-		const hostname = normalizeUrlHostname(parsed.hostname);
-		if (isInternalHostname(hostname)) {
-			return false;
+		if (!allowLan) {
+			const hostname = normalizeUrlHostname(parsed.hostname);
+			if (isInternalHostname(hostname)) {
+				return false;
+			}
+
+			return isIP(hostname) === 0 || !isPrivateOrReservedAddress(hostname);
 		}
 
-		return isIP(hostname) === 0 || !isPrivateOrReservedAddress(hostname);
+		return true;
 	} catch {
 		return false;
 	}
@@ -322,8 +328,9 @@ function createPinnedDispatcher(hostname: string, addresses: readonly { address:
 async function validateWebhookDestination(
 	value: string,
 	dnsLookup: WebhookDnsLookup,
+	allowLan = false,
 ): Promise<PinnedWebhookDestination> {
-	if (!isWebhookUrlAllowed(value)) {
+	if (!isWebhookUrlAllowed(value, allowLan)) {
 		return { allowed: false, reason: "Webhook URL must target a public http(s) host." };
 	}
 
@@ -347,15 +354,15 @@ async function validateWebhookDestination(
 		return { allowed: false, reason: "Webhook host did not resolve to a connectable address." };
 	}
 
-	if (addresses.some((entry) => isPrivateOrReservedAddress(entry.address))) {
+	if (!allowLan && addresses.some((entry) => isPrivateOrReservedAddress(entry.address))) {
 		return { allowed: false, reason: "Webhook host resolved to a private or reserved network address." };
 	}
 
 	return { allowed: true, dispatcher: createPinnedDispatcher(hostname, addresses) };
 }
 
-function isValidHttpUrl(value: string): boolean {
-	return isWebhookUrlAllowed(value);
+function isValidHttpUrl(value: string, allowLan = false): boolean {
+	return isWebhookUrlAllowed(value, allowLan);
 }
 
 function isDiscordUrl(value: string): boolean {
@@ -434,9 +441,10 @@ function mergeHeaders(
 
 function resolveTargets(config: WebhookConfig): ResolvedWebhookTarget[] {
 	const targets: ResolvedWebhookTarget[] = [];
+	const allowLan = config.allowLanWebhook === true;
 
 	const addTarget = (target: WebhookTargetConfig): void => {
-		if (target.enabled === false || !target.url || !isValidHttpUrl(target.url)) {
+		if (target.enabled === false || !target.url || !isValidHttpUrl(target.url, allowLan)) {
 			return;
 		}
 		const provider =
@@ -455,7 +463,7 @@ function resolveTargets(config: WebhookConfig): ResolvedWebhookTarget[] {
 		});
 	};
 
-	if (config.discordWebhookUrl && isValidHttpUrl(config.discordWebhookUrl)) {
+	if (config.discordWebhookUrl && isValidHttpUrl(config.discordWebhookUrl, allowLan)) {
 		addTarget({
 			provider: "discord",
 			url: config.discordWebhookUrl,
@@ -465,7 +473,7 @@ function resolveTargets(config: WebhookConfig): ResolvedWebhookTarget[] {
 		});
 	}
 
-	if (config.genericWebhookUrl && isValidHttpUrl(config.genericWebhookUrl)) {
+	if (config.genericWebhookUrl && isValidHttpUrl(config.genericWebhookUrl, allowLan)) {
 		addTarget({
 			provider: "generic",
 			url: config.genericWebhookUrl,
@@ -528,6 +536,7 @@ function resolveConfig(config: WebhookConfig = {}, env: NodeJS.ProcessEnv = proc
 		discordMention: merged.discordMention,
 		discordUsername: merged.discordUsername,
 		discordAvatarUrl: merged.discordAvatarUrl,
+		allowLanWebhook: merged.allowLanWebhook === true,
 		logger,
 		dnsLookup,
 		fetch: fetchImpl,
@@ -819,7 +828,7 @@ export class WebhookService {
 	}
 
 	private async sendOnce(target: ResolvedWebhookTarget, event: WebhookEvent, externalSignal?: AbortSignal): Promise<SendAttemptResult> {
-		const destination = await validateWebhookDestination(target.url, this.config.dnsLookup);
+		const destination = await validateWebhookDestination(target.url, this.config.dnsLookup, this.config.allowLanWebhook);
 		if (!destination.allowed) {
 			return { success: false, statusCode: 400, error: destination.reason ?? "Webhook URL was blocked." };
 		}
