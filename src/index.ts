@@ -56,6 +56,7 @@ import type {
 } from "./types.ts";
 import type { TTSConfig, TTSService, TTSServiceOptions } from "./types/tts.ts";
 import type { WebhookConfig, WebhookService } from "./webhook.ts";
+import { registerGotgenesPermissionEvents } from "./gotgenes-permission-adapter.ts";
 import {
 	envBoolean,
 	envInteger,
@@ -1622,6 +1623,17 @@ export default function smartVoiceNotifyExtension(
 			...permissionEventFields(event),
 			state: event.state,
 		});
+	});
+
+	// New: gotgenes permission event support (additive, does not affect existing behavior)
+	registerGotgenesPermissionEvents(pi, {
+		queuePermissionNotification,
+		removePermissionFromBatch,
+		cancelReminderActivityForKey,
+		getActiveSessionContext: () => activeSessionContext,
+		getConfig: () => config,
+		isNotificationEnabled,
+		logger,
 	});
 
 	const applySetting = (draft: VoiceNotifyConfig, id: string, value: string): void => {
