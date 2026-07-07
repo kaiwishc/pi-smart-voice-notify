@@ -541,7 +541,23 @@ export default function smartVoiceNotifyExtension(
 	const getWebhookService = async (): Promise<WebhookService> => {
 		if (!webhookService) {
 			const { createWebhookService } = await import("./webhook.ts");
-			webhookService = createWebhookService(buildWebhookConfig());
+			const wc = buildWebhookConfig();
+			if (config.webhook.useNativeHttp) {
+				const { nativeFetch } = await import("./native-fetch.ts");
+				const timeoutMs = config.webhook.requestTimeoutMs;
+				wc.fetch = async (url, init) => {
+					if (url.startsWith("http://")) {
+						return nativeFetch(url, init, {
+							timeoutMs,
+							logger: (message, details = {}) => {
+								logger.debug(`webhook.native-fetch.${message}`, details);
+							},
+						});
+					}
+					return fetch(url, init);
+				};
+			}
+			webhookService = createWebhookService(wc);
 		}
 		return webhookService;
 	};

@@ -199,6 +199,7 @@ export const DEFAULT_CONFIG: VoiceNotifyConfig = {
 		maxRetries: 3,
 		requestTimeoutMs: 8000,
 		allowLanWebhook: false,
+		useNativeHttp: false,
 	},
 	enableWebhook: false,
 	webhookEnabled: false,
@@ -554,6 +555,10 @@ export function normalizeConfig(raw: unknown): VoiceNotifyConfig {
 		webhookRecord.allowLanWebhook,
 		DEFAULT_CONFIG.webhook.allowLanWebhook,
 	);
+	const webhookUseNativeHttp = boolOrDefault(
+		webhookRecord.useNativeHttp,
+		DEFAULT_CONFIG.webhook.useNativeHttp,
+	);
 
 	const aiEnabled = boolOrDefault(
 		aiMessagesRecord.enabled ?? record.enableAIMessages,
@@ -744,6 +749,7 @@ export function normalizeConfig(raw: unknown): VoiceNotifyConfig {
 			maxRetries: webhookMaxRetries,
 			requestTimeoutMs: webhookRequestTimeoutMs,
 			allowLanWebhook: webhookAllowLan,
+			useNativeHttp: webhookUseNativeHttp,
 		},
 		enableWebhook: webhookEnabled,
 		webhookEnabled,
