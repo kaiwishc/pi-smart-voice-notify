@@ -32,6 +32,10 @@ import type { VoiceNotifyConfig } from "../src/types.ts";
 
 interface FakeContext {
 	hasUI: boolean;
+	ui?: {
+		setStatus: (key: string, value: string | undefined) => void;
+		notify: () => void;
+	};
 	cwd?: string;
 	hasPendingMessages?: () => boolean;
 }
@@ -373,6 +377,20 @@ test("skipWhenFocused=true suppresses focused notifications and uses config focu
 	assert.equal(immediateNotificationCalls(ttsCalls).length, 0);
 	assert.equal(focusChecks.length, 1);
 	assert.equal(focusChecks[0]?.cacheTtlMs, 975);
+});
+
+test("hideFooter clears the Pi agent status footer", async () => {
+	const statusUpdates: Array<{ key: string; value: string | undefined }> = [];
+	const { ctx, pi } = createHarness({ hideFooter: true });
+	ctx.hasUI = true;
+	ctx.ui = {
+		setStatus: (key, value) => statusUpdates.push({ key, value }),
+		notify: () => {},
+	};
+
+	await emitSessionStart(pi, ctx);
+
+	assert.deepEqual(statusUpdates, [{ key: "smart-voice-notify", value: undefined }]);
 });
 
 test("initializeTTSService receives the full configured TTS settings", async (t) => {

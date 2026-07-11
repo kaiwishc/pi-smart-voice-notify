@@ -192,6 +192,9 @@ function hasPendingAgentMessages(ctx: ExtensionContext): boolean {
 }
 
 function statusLine(config: VoiceNotifyConfig): string | undefined {
+	if (config.hideFooter) {
+		return undefined;
+	}
 	if (!config.enabled) {
 		return "voice:off";
 	}

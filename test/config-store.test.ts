@@ -44,8 +44,9 @@ test("deepMergeConfigRecords does not mutate its inputs", () => {
 
 test("a partial project record overrides only its keys through normalizeConfig", () => {
 	const globalRecord = { windowsOptimized: true, notificationMode: "tts-first" };
-	const projectRecord = { windowsOptimized: false };
+	const projectRecord = { windowsOptimized: false, hideFooter: true };
 	const config = normalizeConfig(deepMergeConfigRecords(globalRecord, projectRecord));
 	assert.equal(config.windowsOptimized, false);
 	assert.equal(config.notificationMode, "tts-first");
+	assert.equal(config.hideFooter, true);
 });

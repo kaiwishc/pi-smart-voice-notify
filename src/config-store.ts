@@ -131,6 +131,7 @@ export const QUESTION_HINTS = ["question", "need your input", "please answer", "
 export const DEFAULT_CONFIG: VoiceNotifyConfig = {
 	version: 1,
 	enabled: true,
+	hideFooter: false,
 	windowsOptimized: true,
 	notificationMode: "sound-first",
 	enableSound: true,
@@ -737,6 +738,8 @@ export function normalizeConfig(raw: unknown): VoiceNotifyConfig {
 			0,
 			100,
 		),
+
+		hideFooter: boolOrDefault(record.hideFooter, DEFAULT_CONFIG.hideFooter),
 
 		webhook: {
 			enabled: webhookEnabled,

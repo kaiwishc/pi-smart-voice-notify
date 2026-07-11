@@ -114,6 +114,7 @@ A starter template is provided in `config/config.example.json`. On startup, the 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | boolean | `true` | Master on/off switch |
+| `hideFooter` | boolean | `false` | Hide the Pi agent status footer |
 | `windowsOptimized` | boolean | `true` | Show a compatibility notice on platforms other than Windows/Linux |
 | `notificationMode` | string | `"sound-first"` | Mode: `sound-first`, `tts-first`, `both`, `sound-only` |
 | `enableSound` | boolean | `true` | Enable sound playback |

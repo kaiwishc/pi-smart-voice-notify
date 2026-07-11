@@ -75,6 +75,7 @@ export type FlatAIMessageConfig = {
 export interface VoiceNotifyConfig extends EngineTtsSettings, FlatAIMessageConfig {
 	version: 1;
 	enabled: boolean;
+	hideFooter: boolean;
 	windowsOptimized: boolean;
 	notificationMode: NotificationMode;
 	enableSound: boolean;

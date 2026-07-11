@@ -4,6 +4,7 @@
 
   "version": 1,
   "enabled": true,
+  "hideFooter": false,
   "windowsOptimized": true,
 
   "_comment_notifications": "Notification delivery and channel toggles.",
